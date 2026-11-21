@@ -43,8 +43,9 @@ HQ = (MID * BLOCK + ROAD + (BLOCK - ROAD) // 2,) * 2   # κέντρο της π�
 NAV = 50
 
 MONSTERS_ALIVE = 16
-ALLIES = 8
-ALLY_ESCORTS = 5
+ALLIES = 6                  # πόσοι σύμμαχοι έρχονται όταν τους καλέσεις
+HELP_TIME = 30              # δευτερόλεπτα που μένει η ομάδα
+HELP_COOLDOWN = 60          # πόσο περιμένεις για να ξανακαλέσεις
 ALLY_KILL_BONUS = 1
 ALLY_RESPAWN = 7
 LIVES = 3
@@ -1293,8 +1294,8 @@ class Coin:
         draw_trophy(surf, x, y, 0.8)
 
 
-POWER_KINDS = ["heart", "shield", "shoes", "magnet"]
-POWER_NAMES = {"heart": "Καρδιά!", "shield": "Ασπίδα!", "shoes": "Παπούτσια ταχύτητας!", "magnet": "Μαγνήτης!"}
+POWER_KINDS = ["heart", "shield", "shoes", "magnet", "team"]
+POWER_NAMES = {"heart": "Καρδιά!", "shield": "Ασπίδα!", "shoes": "Παπούτσια ταχύτητας!", "magnet": "Μαγνήτης!", "team": "Ήρθε η ομάδα!"}
 
 
 def draw_power_icon(surf, kind, x, y, s=1.0):
@@ -1313,12 +1314,21 @@ def draw_power_icon(surf, kind, x, y, s=1.0):
         pygame.draw.rect(surf, (230, 60, 60), (x - 12 * s, y - 12 * s, 10 * s, 12 * s), border_radius=int(3 * s))
         pygame.draw.rect(surf, WHITE, (x - 12 * s, y + 5 * s, 24 * s, 4 * s))
         pygame.draw.polygon(surf, (255, 230, 80), [(x - 14 * s, y - 10 * s), (x - 22 * s, y - 14 * s), (x - 20 * s, y - 6 * s)])
+    elif kind == "team":
+        draw_team_icon(surf, x, y, s)
     elif kind == "magnet":
         pygame.draw.arc(surf, (220, 50, 50), (x - 12 * s, y - 12 * s, 24 * s, 24 * s), 3.14, 6.28, max(2, int(7 * s)))
         pygame.draw.rect(surf, (220, 50, 50), (x - 12 * s, y - 1 * s, 7 * s, 8 * s))
         pygame.draw.rect(surf, (220, 50, 50), (x + 5 * s, y - 1 * s, 7 * s, 8 * s))
         pygame.draw.rect(surf, (230, 230, 230), (x - 12 * s, y + 7 * s, 7 * s, 5 * s))
         pygame.draw.rect(surf, (230, 230, 230), (x + 5 * s, y + 7 * s, 7 * s, 5 * s))
+
+
+def draw_team_icon(surf, x, y, s=1.0):
+    for dx, col in ((-8, (230, 120, 40)), (8, (60, 160, 90)), (0, (40, 110, 220))):
+        yy = y + (2 if dx else -2) * s
+        pygame.draw.rect(surf, col, (x + dx * s - 6 * s, yy, 12 * s, 12 * s), border_radius=int(4 * s))
+        pygame.draw.circle(surf, SKIN, (int(x + dx * s), int(yy - 5 * s)), max(2, int(5 * s)))
 
 
 class PowerUp:
@@ -1488,12 +1498,8 @@ class Game:
         self.player = Human(*HQ, is_player=True)
         self.dog = Dog(HQ[0] + 40, HQ[1] + 25)
         self.allies = []
-        for i in range(ALLIES):
-            a = Human(HQ[0] + random.uniform(-50, 50), HQ[1] + random.uniform(-50, 50),
-                      role="escort" if i < ALLY_ESCORTS else "patrol")
-            a.slot = i * 6.283 / ALLY_ESCORTS
-            self.allies.append(a)
-        self.humans = [self.player] + self.allies
+        self.humans = [self.player]
+        self.help_t = self.help_cd = 0.0
         self.monsters, self.bullets, self.shots = [], [], []
         self.coins, self.powerups, self.particles, self.texts = [], [], [], []
         self.lives = LIVES
@@ -1510,6 +1516,43 @@ class Game:
         self.mouse_fire = False
         self.state = "play"
         self.set_banner(f"{th['name']}: βρες {th['goal']} τέρατα!", 3.5)
+
+    # ------------------------------------------------------------ ομάδα (έρχεται μόνο όταν την καλέσεις)
+    def call_team(self, dur=HELP_TIME, from_button=False):
+        if self.state != "play" or self.dead_timer > 0:
+            return
+        if from_button:
+            if self.help_cd > 0:
+                return
+            self.help_cd = HELP_COOLDOWN
+        p = self.player
+        if not self.allies:
+            for i in range(ALLIES):
+                a = Human(p.x, p.y, role="escort")
+                a.slot = i * 6.283 / ALLIES
+                a.invuln = 0
+                for _ in range(25):
+                    ang, r = random.random() * 6.283, random.uniform(60, 150)
+                    x, y = p.x + math.cos(ang) * r, p.y + math.sin(ang) * r
+                    if not self.world.blocked(x, y, a.r):
+                        a.x, a.y = x, y
+                        break
+                self.allies.append(a)
+                self.poof(a.x, a.y - 10, (150, 220, 255), 10)
+            self.humans = [p] + self.allies
+        self.help_t = max(self.help_t, 0) + dur
+        self.set_banner(f"Ήρθε η ομάδα για {int(self.help_t)} δευτερόλεπτα!", 2.5, (150, 230, 255))
+        self.sfx.play("powerup")
+
+    def dismiss_team(self):
+        for a in self.allies:
+            if a.alive:
+                self.poof(a.x, a.y - 10, (150, 220, 255), 8)
+                if self.on_screen(a.x, a.y):
+                    self.add_text(a.x, a.y - 50, "Γεια!", WHITE, 18)
+        self.allies = []
+        self.humans = [self.player]
+        self.help_t = 0
 
     def set_banner(self, text, dur=3.0, color=(255, 230, 80)):
         self.banner = [text, dur, color]
@@ -1615,6 +1658,11 @@ class Game:
             self.banner[1] -= dt
             if self.banner[1] <= 0:
                 self.banner = None
+        self.help_cd = max(0, self.help_cd - dt)
+        if self.allies:
+            self.help_t -= dt
+            if self.help_t <= 0:
+                self.dismiss_team()
         self.update_player(dt)
         self.update_dog(dt)
         for a in self.allies:
@@ -1740,7 +1788,7 @@ class Game:
             a.respawn -= dt
             if a.respawn <= 0:
                 a.alive, a.hp, a.invuln = True, a.maxhp, 2.0
-                a.x, a.y = HQ[0] + random.uniform(-40, 40), HQ[1] + random.uniform(-40, 40)
+                a.x, a.y = self.player.x, self.player.y
                 a.path = None
             return
         a.cool = max(0, a.cool - dt)
@@ -1969,6 +2017,8 @@ class Game:
             p.speed_t = 8.0
         elif kind == "magnet":
             p.magnet_t = 12.0
+        elif kind == "team":
+            self.call_team(HELP_TIME)
         self.add_text(p.x, p.y - 60, POWER_NAMES[kind], (120, 255, 200), 26)
         self.sfx.play("powerup")
         for _ in range(16):
@@ -2250,6 +2300,23 @@ class Game:
         self.text(wpn["name"], 15, WHITE, wc[0], wc[1] + 14, shadow_px=1)
         if self.save["weapons"] > 1:
             self.hot.append((pygame.Rect(wc[0] - 46, wc[1] - 46, 92, 92), self.cycle_weapon))
+        # κουμπί ΒΟΗΘΕΙΑ (φωνάζει την ομάδα)
+        hc = (W - 110, H - 262) if self.touch_seen else (W - 365, H - 80)
+        ready = self.help_cd <= 0
+        active = bool(self.allies)
+        col = (60, 160, 230) if ready else (100, 100, 115)
+        pygame.draw.circle(s, (0, 0, 0), (hc[0], hc[1] + 4), 46)
+        pygame.draw.circle(s, col, hc, 46)
+        pygame.draw.circle(s, (200, 235, 255) if ready else (160, 160, 170), hc, 46, 4)
+        draw_team_icon(s, hc[0], hc[1] - 12, 1.3)
+        if active:
+            lbl = f"ΟΜΑΔΑ {int(self.help_t) + 1}"
+        elif ready:
+            lbl = "ΒΟΗΘΕΙΑ"
+        else:
+            lbl = f"{int(self.help_cd) + 1}"
+        self.text(lbl, 15, WHITE, hc[0], hc[1] + 14, shadow_px=1)
+        self.hot.append((pygame.Rect(hc[0] - 46, hc[1] - 46, 92, 92), lambda: self.call_team(HELP_TIME, True)))
         # χειριστήρια αφής
         if self.touch_seen:
             fc = (W - 110, H - 120)
@@ -2274,7 +2341,7 @@ class Game:
             pygame.draw.circle(s, (230, 230, 240), (int(knob[0]), int(knob[1])), 38)
             pygame.draw.circle(s, (150, 150, 170), (int(knob[0]), int(knob[1])), 38, 4)
         else:
-            self.text("WASD: κίνηση · ποντίκι/SPACE: φωτιά · Q: όπλο · P: παύση · M: ήχος", 18, WHITE, W // 2, H - 30, shadow_px=2)
+            self.text("WASD: κίνηση · ποντίκι/SPACE: φωτιά · Q: όπλο · H: βοήθεια · P: παύση", 18, WHITE, W // 2, H - 30, shadow_px=2)
         if self.banner:
             txt, dur, col = self.banner
             img = font(34).render(txt, True, col)
@@ -2530,6 +2597,8 @@ class Game:
                     self.toggle_sound()
                 elif e.key == pygame.K_q and self.state == "play":
                     self.cycle_weapon()
+                elif e.key == pygame.K_h and self.state == "play":
+                    self.call_team(HELP_TIME, True)
                 elif e.key == pygame.K_RETURN and self.state == "menu":
                     self.start_world(self.save["unlocked"] - 1)
             elif e.type == pygame.FINGERDOWN:
