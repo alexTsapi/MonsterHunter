@@ -1,0 +1,2586 @@
+"""
+MONSTER HUNTER - Κυνήγι Τεράτων
+================================
+Η ιδέα είναι ενός 6χρονου κυνηγού τεράτων! :)
+
+- 5 κόσμοι: Πόλη, Δάσος, Παραλία, Χιόνια, Στοιχειωμένο Σπίτι
+- Σε κάθε κόσμο: βρες τα κρυμμένα τέρατα -> μετά έρχεται ο ΑΡΧΗΓΟΣ
+- Νικάς τον αρχηγό -> νέο όπλο + ξεκλειδώνει ο επόμενος κόσμος
+- Σκυλάκι-βοηθός που γαβγίζει όταν βρει κρυμμένο τέρας
+- Άλμπουμ τεράτων (σαν Pokémon)
+- Δώρα: καρδιά, ασπίδα, παπούτσια ταχύτητας, μαγνήτης κυπέλλων
+- Σύμμαχοι που παίζουν μόνοι τους
+- Αποθηκεύει μόνο του
+
+Χειρισμός ΤΑΜΠΛΕΤ: αριστερός αντίχειρας = περπάτημα, κόκκινο κουμπί = φωτιά (στοχεύει μόνο του)
+Χειρισμός PC: WASD/βελάκια, ποντίκι ή SPACE για φωτιά, Q αλλαγή όπλου, P παύση, M ήχος
+"""
+
+import array
+import heapq
+import json
+import math
+import os
+import random
+import sys
+
+import pygame
+
+# ---------------------------------------------------------------- βασικά
+W, H = 1120, 700
+FPS = 60
+ANDROID = "ANDROID_ARGUMENT" in os.environ or "ANDROID_PRIVATE" in os.environ
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SAVE_DIR = os.environ.get("ANDROID_PRIVATE", BASE_DIR)
+SAVE_FILE = os.path.join(SAVE_DIR, "monster_hunter_save.json")
+FONT_FILE = os.path.join(BASE_DIR, "font.ttf")
+
+BLOCK, ROAD, NB = 400, 100, 7
+SIDEWALK, ALLEY = 30, 46
+WORLD_W = WORLD_H = NB * BLOCK + ROAD           # 2900
+MID = NB // 2
+HQ = (MID * BLOCK + ROAD + (BLOCK - ROAD) // 2,) * 2   # κέντρο της πλατείας
+NAV = 50
+
+MONSTERS_ALIVE = 16
+ALLIES = 8
+ALLY_ESCORTS = 5
+ALLY_KILL_BONUS = 1
+ALLY_RESPAWN = 7
+LIVES = 3
+PLAYER_SPEED, ALLY_SPEED, DOG_SPEED = 4.2, 3.4, 4.6
+PLAYER_MAX_HP, ALLY_MAX_HP = 100, 80
+BULLET_SPEED = 11
+REVEAL_RADIUS = 200
+AUTO_AIM_RANGE = 520
+POWERUPS_ON_MAP = 6
+BOSS_REWARD = 25
+
+WHITE = (255, 255, 255)
+SKIN = (255, 220, 180)
+GOLD = (255, 205, 40)
+
+# ---------------------------------------------------------------- τέρατα
+MT = {
+    "slime":  dict(name="Γλίτσα",    color=(90, 210, 90),   hp=2, speed=1.7, dmg=16, reward=2, r=18),
+    "goblin": dict(name="Γκόμπλιν",  color=(110, 170, 60),  hp=3, speed=2.4, dmg=20, reward=3, r=20),
+    "ghost":  dict(name="Φάντασμα",  color=(220, 225, 255), hp=2, speed=3.0, dmg=18, reward=3, r=17, fly=True),
+    "troll":  dict(name="Τρολ",      color=(120, 140, 110), hp=7, speed=1.4, dmg=34, reward=6, r=30),
+    "spider": dict(name="Αράχνη",    color=(70, 55, 85),    hp=2, speed=3.2, dmg=16, reward=3, r=18),
+    "bat":    dict(name="Νυχτερίδα", color=(95, 65, 120),   hp=1, speed=3.6, dmg=12, reward=2, r=15, fly=True),
+    "mummy":  dict(name="Μούμια",    color=(225, 215, 180), hp=5, speed=1.5, dmg=26, reward=5, r=20),
+    "dragon": dict(name="Δρακάκι",   color=(220, 80, 50),   hp=5, speed=2.2, dmg=24, reward=6, r=24, shoot=3.0),
+}
+BOSSES = {
+    "boss_troll":  dict(name="Βασιλιάς Τρολ",     base="troll",  color=(110, 120, 150), hp=60, speed=1.6, dmg=40,
+                        r=52, scale=1.9, shoot=2.2, shot_col=(140, 120, 100)),
+    "boss_spider": dict(name="Βασίλισσα Αράχνη",  base="spider", color=(110, 40, 120),  hp=70, speed=2.1, dmg=30,
+                        r=50, scale=2.6, shoot=2.4, shot_col=(240, 240, 240), summon="spider"),
+    "boss_mummy":  dict(name="Φαραώ Μούμια",      base="mummy",  color=(240, 210, 120), hp=85, speed=1.7, dmg=40,
+                        r=48, scale=2.3, shoot=2.0, shot_col=(230, 200, 120), summon="mummy"),
+    "boss_dragon": dict(name="Παγο-Δράκος",       base="dragon", color=(90, 170, 235),  hp=95, speed=2.0, dmg=40,
+                        r=55, scale=2.3, shoot=1.6, shot_col=(170, 230, 255)),
+    "boss_ghost":  dict(name="Βασιλιάς Φάντασμα", base="ghost",  color=(200, 180, 255), hp=120, speed=2.2, dmg=40,
+                        r=52, scale=2.8, shoot=1.5, shot_col=(200, 120, 255), summon="bat", fly=True),
+}
+for k, v in MT.items():
+    v["key"], v["boss"] = k, False
+    v.setdefault("base", k)
+for k, v in BOSSES.items():
+    v["key"], v["boss"] = k, True
+    v["reward"] = BOSS_REWARD
+ALBUM_ORDER = list(MT) + list(BOSSES)
+ALL_TYPES = {**MT, **BOSSES}
+
+# ---------------------------------------------------------------- όπλα
+WEAPONS = [
+    dict(name="Πιστόλι",      cd=0.24, angles=[0],             offs=[0],     dmg=1, color=(255, 240, 120)),
+    dict(name="Διπλό Όπλο",   cd=0.22, angles=[0, 0],          offs=[-7, 7], dmg=1, color=(255, 190, 90)),
+    dict(name="Τριπλό",       cd=0.26, angles=[-0.2, 0, 0.2],  offs=[0, 0, 0], dmg=1, color=(120, 255, 140)),
+    dict(name="Όπλο Πάγου",   cd=0.15, angles=[0],             offs=[0],     dmg=1, color=(150, 225, 255), freeze=True),
+    dict(name="Λέιζερ",       cd=0.11, angles=[0],             offs=[0],     dmg=2, color=(255, 90, 210), pierce=True),
+]
+
+# ---------------------------------------------------------------- κόσμοι
+WORLDS = [
+    dict(key="city", name="Πόλη", goal=12, boss="boss_troll",
+         pool={"slime": 5, "goblin": 4, "ghost": 2, "troll": 1},
+         ground=(158, 155, 148), road=(62, 62, 68), park=(72, 140, 72), park_chance=0.2,
+         solid="building", side_spots=("bin", "bin", "bush"), road_spot="car", park_spot="bush", tree="round"),
+    dict(key="forest", name="Δάσος", goal=14, boss="boss_spider",
+         pool={"goblin": 4, "spider": 4, "slime": 3, "bat": 2},
+         ground=(72, 128, 62), road=(145, 108, 68), park=(115, 170, 85), park_chance=0.25,
+         solid="grove", side_spots=("mushroom", "bush", "bush"), road_spot="log", park_spot="bush", tree="round_dark"),
+    dict(key="beach", name="Παραλία", goal=15, boss="boss_mummy",
+         pool={"slime": 3, "mummy": 3, "spider": 2, "goblin": 2, "dragon": 1},
+         ground=(236, 214, 160), road=(212, 186, 132), park=(240, 222, 170), park_chance=0.3,
+         solid="hut", side_spots=("sandcastle", "umbrella"), road_spot="boat", park_spot="umbrella", tree="palm"),
+    dict(key="snow", name="Χιόνια", goal=16, boss="boss_dragon",
+         pool={"ghost": 3, "troll": 2, "bat": 3, "dragon": 2, "goblin": 2},
+         ground=(236, 241, 248), road=(196, 206, 222), park=(225, 235, 245), park_chance=0.25,
+         solid="cabin", side_spots=("snowman", "snowpile"), road_spot="sled", park_spot="snowpile", tree="pine"),
+    dict(key="haunted", name="Στοιχειωμένο", goal=18, boss="boss_ghost",
+         pool={"ghost": 4, "bat": 4, "mummy": 3, "spider": 2, "dragon": 1},
+         ground=(64, 60, 74), road=(98, 94, 104), park=(52, 72, 52), park_chance=0.3,
+         solid="crypt", side_spots=("pumpkin", "tomb"), road_spot="coffin", park_spot="tomb", tree="dead", dark=True),
+]
+
+SHIRTS = [(200, 60, 60), (230, 150, 40), (60, 160, 90), (150, 80, 180), (40, 170, 190),
+          (220, 200, 60), (180, 100, 60), (230, 110, 160)]
+HELMETS = [(60, 90, 60), (80, 80, 80), (120, 90, 50), (50, 60, 110), (150, 40, 40)]
+NAMES = ["Νίκος", "Μαρία", "Κώστας", "Ελένη", "Γιάννης", "Σοφία", "Πέτρος", "Άννα", "Δημήτρης", "Ζωή"]
+BUILDING_COLORS = [(190, 95, 75), (205, 175, 125), (165, 175, 190), (150, 110, 90),
+                   (215, 205, 175), (120, 140, 175), (180, 120, 140), (140, 160, 130)]
+CAR_COLORS = [(200, 40, 40), (40, 90, 200), (230, 230, 230), (30, 30, 30), (240, 190, 30),
+              (60, 150, 80), (150, 150, 160), (230, 120, 30)]
+
+
+_font_cache = {}
+
+
+def font(size):
+    if size not in _font_cache:
+        if os.path.exists(FONT_FILE):
+            _font_cache[size] = pygame.font.Font(FONT_FILE, size)
+        else:
+            _font_cache[size] = pygame.font.SysFont("arial,dejavusans,freesans", size, bold=True)
+    return _font_cache[size]
+
+
+def dist(a, b):
+    return math.hypot(a.x - b.x, a.y - b.y)
+
+
+def shade(c, k):
+    return tuple(max(0, min(255, int(v * k))) for v in c)
+
+
+# ---------------------------------------------------------------- σχέδια χαρακτήρων
+def limb(surf, color, a, b, w):
+    a = (int(a[0]), int(a[1]))
+    b = (int(b[0]), int(b[1]))
+    pygame.draw.line(surf, color, a, b, w)
+    pygame.draw.circle(surf, color, a, w // 2)
+    pygame.draw.circle(surf, color, b, w // 2)
+
+
+_shadow_cache = {}
+
+
+def shadow(surf, sx, sy, w):
+    w = max(4, int(w))
+    img = _shadow_cache.get(w)
+    if img is None:
+        img = pygame.Surface((w, 10), pygame.SRCALPHA)
+        pygame.draw.ellipse(img, (0, 0, 0, 75), (0, 0, w, 10))
+        _shadow_cache[w] = img
+    surf.blit(img, (sx - w // 2, sy - 5))
+
+
+def draw_hero(surf, sx, sy, aim, walk, shirt=(40, 110, 220), helmet=(60, 90, 60)):
+    f = 1 if math.cos(aim) >= 0 else -1
+    sw = math.sin(walk) * 6 if walk is not None else 0
+    shadow(surf, sx, sy + 22, 30)
+    pants, boots = (45, 50, 80), (70, 45, 25)
+    limb(surf, pants, (sx - 4, sy + 4), (sx - 4 + sw, sy + 19), 7)
+    limb(surf, pants, (sx + 4, sy + 4), (sx + 4 - sw, sy + 19), 7)
+    pygame.draw.ellipse(surf, boots, (sx - 4 + sw - 4 + 2 * f, sy + 17, 10, 7))
+    pygame.draw.ellipse(surf, boots, (sx + 4 - sw - 4 + 2 * f, sy + 17, 10, 7))
+    pygame.draw.rect(surf, (120, 80, 40), (sx - 6 - 9 * f, sy - 13, 12, 16), border_radius=3)
+    limb(surf, shirt, (sx - 6 * f, sy - 9), (sx - 9 * f, sy + 2 - sw * 0.5), 6)
+    pygame.draw.rect(surf, shirt, (sx - 10, sy - 15, 20, 22), border_radius=6)
+    pygame.draw.rect(surf, (90, 60, 30), (sx - 10, sy + 1, 20, 4))
+    pygame.draw.rect(surf, (230, 190, 60), (sx - 2, sy + 1, 4, 4))
+    hx, hy = sx, sy - 25
+    pygame.draw.circle(surf, SKIN, (hx, hy), 10)
+    pygame.draw.circle(surf, helmet, (hx, hy - 2), 11, draw_top_left=True, draw_top_right=True)
+    pygame.draw.rect(surf, helmet, (hx - 11 if f > 0 else hx - 4, hy - 3, 15, 3))
+    pygame.draw.circle(surf, (30, 30, 30), (hx + 4 * f, hy + 1), 2)
+    pygame.draw.line(surf, (160, 90, 70), (hx + 2 * f, hy + 6), (hx + 6 * f, hy + 5), 2)
+    ca, sa = math.cos(aim), math.sin(aim)
+    shx, shy = sx + 3 * f, sy - 8
+    hand = (shx + ca * 13, shy + sa * 13)
+    tip = (sx + ca * 34, sy - 8 + sa * 34)
+    pygame.draw.line(surf, (35, 35, 35), (int(shx + ca * 6), int(shy + sa * 6)), (int(tip[0]), int(tip[1])), 7)
+    pygame.draw.line(surf, (110, 110, 120), (int(hand[0]), int(hand[1])), (int(tip[0]), int(tip[1])), 3)
+    limb(surf, shirt, (shx, shy), hand, 6)
+    pygame.draw.circle(surf, SKIN, (int(hand[0]), int(hand[1])), 4)
+
+
+def draw_goblin(surf, sx, sy, f, ph, flash, col=None):
+    skin = WHITE if flash else (col or (110, 170, 60))
+    dark = WHITE if flash else shade(skin, 0.65)
+    sw = math.sin(ph * 1.6) * 6
+    shadow(surf, sx, sy + 20, 28)
+    limb(surf, dark, (sx - 4, sy + 3), (sx - 4 + sw, sy + 18), 6)
+    limb(surf, dark, (sx + 4, sy + 3), (sx + 4 - sw, sy + 18), 6)
+    limb(surf, skin, (sx - 7 * f, sy - 9), (sx - 11 * f, sy + 2 + sw * 0.5), 5)
+    pygame.draw.ellipse(surf, skin, (sx - 9, sy - 15, 18, 20))
+    pygame.draw.polygon(surf, (110, 70, 30), [(sx - 9, sy - 1), (sx + 9, sy - 1), (sx + 6, sy + 8), (sx - 6, sy + 8)])
+    hx, hy = sx + 2 * f, sy - 23
+    pygame.draw.polygon(surf, skin, [(hx - 8, hy - 2), (hx - 22, hy - 9), (hx - 8, hy + 4)])
+    pygame.draw.polygon(surf, skin, [(hx + 8, hy - 2), (hx + 22, hy - 9), (hx + 8, hy + 4)])
+    pygame.draw.circle(surf, skin, (hx, hy), 11)
+    pygame.draw.circle(surf, (255, 230, 0), (hx - 4 + 2 * f, hy - 2), 3)
+    pygame.draw.circle(surf, (255, 230, 0), (hx + 4 + 2 * f, hy - 2), 3)
+    pygame.draw.circle(surf, (200, 0, 0), (hx - 4 + 3 * f, hy - 2), 1)
+    pygame.draw.circle(surf, (200, 0, 0), (hx + 4 + 3 * f, hy - 2), 1)
+    pygame.draw.arc(surf, (40, 20, 10), (hx - 6, hy, 12, 8), 3.4, 6.0, 2)
+    pygame.draw.polygon(surf, WHITE, [(hx - 3, hy + 5), (hx - 1, hy + 9), (hx + 1, hy + 5)])
+    hand = (sx + 13 * f, sy - 3 + sw * 0.4)
+    club_end = (sx + 20 * f, sy - 28)
+    limb(surf, skin, (sx + 7 * f, sy - 9), hand, 5)
+    limb(surf, (120, 75, 30), hand, club_end, 5)
+    pygame.draw.circle(surf, (100, 60, 25), (int(club_end[0]), int(club_end[1])), 7)
+
+
+def draw_troll(surf, sx, sy, f, ph, flash, col=None):
+    skin = WHITE if flash else (col or (120, 140, 110))
+    dark = WHITE if flash else shade(skin, 0.7)
+    belly = WHITE if flash else shade(skin, 1.2)
+    sw = math.sin(ph) * 7
+    shadow(surf, sx, sy + 30, 54)
+    limb(surf, dark, (sx - 11, sy + 6), (sx - 11 + sw, sy + 27), 13)
+    limb(surf, dark, (sx + 11, sy + 6), (sx + 11 - sw, sy + 27), 13)
+    limb(surf, skin, (sx - 18 * f, sy - 16), (sx - 25 * f, sy + 4 + sw * 0.5), 10)
+    pygame.draw.ellipse(surf, skin, (sx - 23, sy - 30, 46, 44))
+    pygame.draw.ellipse(surf, belly, (sx - 14, sy - 16, 28, 26))
+    pygame.draw.rect(surf, (90, 60, 30), (sx - 20, sy + 4, 40, 9), border_radius=3)
+    hx, hy = sx + 5 * f, sy - 37
+    pygame.draw.circle(surf, skin, (hx, hy), 14)
+    pygame.draw.line(surf, (40, 50, 35), (hx - 9, hy - 6), (hx + 9, hy - 6), 4)
+    pygame.draw.circle(surf, (255, 200, 0), (hx - 5 + 2 * f, hy - 2), 3)
+    pygame.draw.circle(surf, (255, 200, 0), (hx + 5 + 2 * f, hy - 2), 3)
+    pygame.draw.ellipse(surf, dark, (hx - 4 + 3 * f, hy + 1, 8, 6))
+    pygame.draw.line(surf, (40, 20, 10), (hx - 7, hy + 8), (hx + 7, hy + 8), 3)
+    pygame.draw.polygon(surf, WHITE, [(hx - 6, hy + 8), (hx - 4, hy + 1), (hx - 2, hy + 8)])
+    pygame.draw.polygon(surf, WHITE, [(hx + 2, hy + 8), (hx + 4, hy + 1), (hx + 6, hy + 8)])
+    hand = (sx + 28 * f, sy - 2 + sw * 0.3)
+    club_end = (sx + 36 * f, sy - 46)
+    limb(surf, skin, (sx + 18 * f, sy - 16), hand, 10)
+    limb(surf, (110, 70, 30), hand, club_end, 8)
+    ce = (int(club_end[0]), int(club_end[1]))
+    for a in range(0, 360, 60):
+        r = math.radians(a)
+        pygame.draw.line(surf, (60, 60, 60), ce, (ce[0] + math.cos(r) * 14, ce[1] + math.sin(r) * 14), 3)
+    pygame.draw.circle(surf, (95, 60, 25), ce, 10)
+
+
+def draw_slime(surf, sx, sy, f, ph, flash, col=None):
+    c = WHITE if flash else (col or (90, 210, 90))
+    sq = math.sin(ph * 1.5) * 0.18
+    w, h = int(40 * (1 + sq)), int(32 * (1 - sq))
+    shadow(surf, sx, sy + 16, w)
+    rect = pygame.Rect(sx - w // 2, sy + 16 - h, w, h)
+    pygame.draw.ellipse(surf, c, rect)
+    pygame.draw.rect(surf, c, (rect.x, rect.centery, w, h // 2), border_bottom_left_radius=8, border_bottom_right_radius=8)
+    pygame.draw.ellipse(surf, (220, 255, 220), (rect.x + 7, rect.y + 5, 10, 6))
+    ey = rect.y + h // 2 - 2
+    for ex in (sx - 7 + 3 * f, sx + 7 + 3 * f):
+        pygame.draw.circle(surf, WHITE, (ex, ey), 5)
+        pygame.draw.circle(surf, (20, 20, 20), (ex + 2 * f, ey), 2)
+    pygame.draw.arc(surf, (20, 60, 20), (sx - 6 + 3 * f, ey + 3, 12, 8), 3.3, 6.1, 2)
+
+
+def draw_ghost(surf, sx, sy, f, ph, flash, col=None):
+    fl = int(math.sin(ph) * 5)
+    shadow(surf, sx, sy + 22, 24)
+    g = pygame.Surface((50, 60), pygame.SRCALPHA)
+    base = col or (225, 230, 255)
+    c = (255, 255, 255, 255) if flash else (*base, 205)
+    pygame.draw.circle(g, c, (25, 20), 17)
+    pygame.draw.rect(g, c, (8, 20, 34, 24))
+    for i in range(4):
+        off = 4 if (i + int(ph * 2)) % 2 else 0
+        pygame.draw.circle(g, c, (12 + i * 9, 44 + off), 5)
+    ex = 25 + 3 * f
+    pygame.draw.ellipse(g, (20, 20, 40, 255), (ex - 10, 14, 7, 10))
+    pygame.draw.ellipse(g, (20, 20, 40, 255), (ex + 3, 14, 7, 10))
+    pygame.draw.ellipse(g, (20, 20, 40, 255), (ex - 4, 28, 8, 10))
+    pygame.draw.circle(g, c, (6, 30 + fl // 2), 5)
+    pygame.draw.circle(g, c, (44, 30 - fl // 2), 5)
+    surf.blit(g, (sx - 25, sy - 36 + fl))
+
+
+def draw_spider(surf, sx, sy, f, ph, flash, col=None):
+    body = WHITE if flash else (col or (70, 55, 85))
+    leg = WHITE if flash else shade(body, 0.7)
+    shadow(surf, sx, sy + 14, 44)
+    for side in (-1, 1):
+        for i in range(4):
+            a = math.sin(ph * 2.5 + i * 1.4 + (side > 0) * 1.5) * 4
+            base = (sx + side * 7, sy - 4 + i * 3)
+            knee = (sx + side * (20 + i * 2), sy - 16 + i * 7 + a)
+            foot = (sx + side * (28 + i), sy + 4 + i * 5 - a)
+            pygame.draw.line(surf, leg, base, knee, 3)
+            pygame.draw.line(surf, leg, knee, foot, 3)
+    pygame.draw.ellipse(surf, body, (sx - 15 - 4 * f, sy - 10, 30, 24))
+    if not flash:
+        pygame.draw.polygon(surf, (220, 40, 40), [(sx - 4 * f - 4, sy - 2), (sx - 4 * f + 4, sy - 2),
+                                                  (sx - 4 * f, sy + 4)])
+        pygame.draw.polygon(surf, (220, 40, 40), [(sx - 4 * f - 4, sy + 9), (sx - 4 * f + 4, sy + 9),
+                                                  (sx - 4 * f, sy + 4)])
+    hx, hy = sx + 12 * f, sy - 8
+    pygame.draw.circle(surf, body, (hx, hy), 10)
+    for ex, ey in ((-4, -3), (3, -3), (-2, 2), (5, 2)):
+        pygame.draw.circle(surf, (255, 50, 50), (hx + ex * f + 2 * f, hy + ey), 2)
+    pygame.draw.line(surf, WHITE, (hx + 3 * f, hy + 7), (hx + 1 * f, hy + 12), 2)
+    pygame.draw.line(surf, WHITE, (hx + 8 * f, hy + 6), (hx + 8 * f, hy + 11), 2)
+
+
+def draw_bat(surf, sx, sy, f, ph, flash, col=None):
+    body = WHITE if flash else (col or (95, 65, 120))
+    wing = WHITE if flash else shade(body, 0.75)
+    bob = math.sin(ph * 2) * 6
+    shadow(surf, sx, sy + 20, 20)
+    y = sy - 16 + bob
+    flap = math.sin(ph * 4) * 10
+    for side in (-1, 1):
+        pts = [(sx + side * 6, y - 2), (sx + side * 20, y - 12 - flap), (sx + side * 32, y - 4 - flap * 0.5),
+               (sx + side * 26, y + 4), (sx + side * 18, y + 1), (sx + side * 11, y + 7)]
+        pygame.draw.polygon(surf, wing, pts)
+    pygame.draw.ellipse(surf, body, (sx - 8, y - 9, 16, 19))
+    pygame.draw.polygon(surf, body, [(sx - 7, y - 6), (sx - 5, y - 15), (sx - 2, y - 7)])
+    pygame.draw.polygon(surf, body, [(sx + 7, y - 6), (sx + 5, y - 15), (sx + 2, y - 7)])
+    pygame.draw.circle(surf, (255, 230, 60), (int(sx - 3 + 2 * f), int(y - 3)), 2)
+    pygame.draw.circle(surf, (255, 230, 60), (int(sx + 3 + 2 * f), int(y - 3)), 2)
+    pygame.draw.line(surf, WHITE, (sx - 2 + 2 * f, y + 3), (sx - 2 + 2 * f, y + 6), 1)
+    pygame.draw.line(surf, WHITE, (sx + 2 + 2 * f, y + 3), (sx + 2 + 2 * f, y + 6), 1)
+
+
+def draw_mummy(surf, sx, sy, f, ph, flash, col=None):
+    wrap = WHITE if flash else (col or (225, 215, 180))
+    line = shade(wrap, 0.7)
+    sw = math.sin(ph * 1.2) * 5
+    shadow(surf, sx, sy + 20, 28)
+    limb(surf, wrap, (sx - 4, sy + 3), (sx - 4 + sw, sy + 18), 7)
+    limb(surf, wrap, (sx + 4, sy + 3), (sx + 4 - sw, sy + 18), 7)
+    pygame.draw.rect(surf, wrap, (sx - 10, sy - 16, 20, 22), border_radius=6)
+    for i in range(4):
+        pygame.draw.line(surf, line, (sx - 10, sy - 13 + i * 5), (sx + 10, sy - 10 + i * 5), 2)
+    arm = math.sin(ph * 1.2) * 3
+    limb(surf, wrap, (sx + 2 * f, sy - 11), (sx + 22 * f, sy - 12 + arm), 6)
+    limb(surf, wrap, (sx - 4 * f, sy - 7), (sx + 18 * f, sy - 6 - arm), 6)
+    hx, hy = sx + 1 * f, sy - 26
+    pygame.draw.circle(surf, wrap, (hx, hy), 10)
+    for i in range(3):
+        pygame.draw.line(surf, line, (hx - 9, hy - 5 + i * 5), (hx + 9, hy - 3 + i * 5), 2)
+    pygame.draw.circle(surf, (120, 255, 120) if not flash else WHITE, (hx + 4 * f, hy - 1), 3)
+    pygame.draw.line(surf, (60, 50, 40), (hx - 5 * f - 2, hy - 1), (hx - 2 * f, hy - 1), 2)
+    tail = math.sin(ph * 3) * 5
+    pygame.draw.line(surf, wrap, (sx - 8 * f, sy - 4), (sx - 20 * f, sy + 2 + tail), 3)
+
+
+def draw_dragon(surf, sx, sy, f, ph, flash, col=None):
+    body = WHITE if flash else (col or (220, 80, 50))
+    dark = WHITE if flash else shade(body, 0.65)
+    belly = WHITE if flash else (250, 205, 100)
+    sw = math.sin(ph * 1.5) * 5
+    shadow(surf, sx, sy + 20, 40)
+    pygame.draw.polygon(surf, body, [(sx - 10 * f, sy - 2), (sx - 10 * f, sy + 8), (sx - 34 * f, sy - 4 + sw)])
+    pygame.draw.polygon(surf, dark, [(sx - 34 * f, sy - 4 + sw), (sx - 42 * f, sy - 10 + sw), (sx - 38 * f, sy + 2 + sw)])
+    flap = math.sin(ph * 2.5) * 8
+    pygame.draw.polygon(surf, dark, [(sx - 2 * f, sy - 12), (sx - 14 * f, sy - 36 - flap), (sx - 26 * f, sy - 22 - flap),
+                                     (sx - 12 * f, sy - 8)])
+    limb(surf, dark, (sx - 6, sy + 4), (sx - 6 + sw, sy + 18), 7)
+    limb(surf, dark, (sx + 6, sy + 4), (sx + 6 - sw, sy + 18), 7)
+    pygame.draw.ellipse(surf, body, (sx - 15, sy - 16, 30, 26))
+    pygame.draw.ellipse(surf, belly, (sx - 7 + 3 * f, sy - 10, 14, 18))
+    for i in range(3):
+        bx = sx - 8 * f + i * 6 * f
+        pygame.draw.polygon(surf, dark, [(bx - 3, sy - 14), (bx + 3, sy - 14), (bx, sy - 21)])
+    hx, hy = sx + 13 * f, sy - 22
+    pygame.draw.circle(surf, body, (hx, hy), 11)
+    pygame.draw.ellipse(surf, body, (hx + (2 if f > 0 else -16), hy - 3, 14, 11))
+    pygame.draw.circle(surf, (40, 20, 10), (hx + 12 * f, hy + 1), 1)
+    pygame.draw.polygon(surf, (250, 240, 200), [(hx - 6, hy - 8), (hx - 3, hy - 18), (hx - 1, hy - 9)])
+    pygame.draw.polygon(surf, (250, 240, 200), [(hx + 1, hy - 9), (hx + 4, hy - 18), (hx + 6, hy - 8)])
+    pygame.draw.circle(surf, (255, 240, 60), (hx + 3 * f, hy - 3), 4)
+    pygame.draw.line(surf, (20, 20, 20), (hx + 3 * f, hy - 6), (hx + 3 * f, hy), 2)
+
+
+def draw_dog(surf, sx, sy, f, ph, moving, barking):
+    fur, dark = (180, 120, 65), (115, 72, 38)
+    sw = math.sin(ph * 2) * 4 if moving else 0
+    shadow(surf, sx, sy + 13, 32)
+    for lx, s in ((-9, sw), (-4, -sw), (6, -sw), (11, sw)):
+        limb(surf, dark if lx in (-4, 6) else fur, (sx + lx * f, sy), (sx + lx * f + s, sy + 12), 5)
+    wag = math.sin(ph * 7) * 6
+    limb(surf, fur, (sx - 13 * f, sy - 4), (sx - 22 * f, sy - 14 + wag), 4)
+    pygame.draw.ellipse(surf, fur, (sx - 15, sy - 9, 30, 16))
+    pygame.draw.ellipse(surf, (235, 205, 165), (sx - 6, sy - 3, 14, 8))
+    pygame.draw.line(surf, (210, 40, 40), (sx + 7 * f, sy - 10), (sx + 10 * f, sy - 2), 3)
+    hx, hy = sx + 15 * f, sy - 13
+    pygame.draw.circle(surf, fur, (hx, hy), 9)
+    pygame.draw.ellipse(surf, (235, 205, 165), (hx + (2 if f > 0 else -12), hy - 1, 10, 8))
+    pygame.draw.circle(surf, (20, 20, 20), (hx + 11 * f, hy + 1), 3)
+    pygame.draw.ellipse(surf, dark, (hx - 7 * f - 4, hy - 7, 8, 14))
+    pygame.draw.circle(surf, (20, 20, 20), (hx + 3 * f, hy - 3), 2)
+    if barking:
+        pygame.draw.polygon(surf, (120, 20, 20), [(hx + 4 * f, hy + 5), (hx + 11 * f, hy + 4), (hx + 9 * f, hy + 10)])
+
+
+DRAWERS = {"goblin": draw_goblin, "troll": draw_troll, "slime": draw_slime, "ghost": draw_ghost,
+           "spider": draw_spider, "bat": draw_bat, "mummy": draw_mummy, "dragon": draw_dragon}
+
+
+def draw_crown(surf, x, y, w):
+    pts = [(x - w, y), (x - w, y - w * 0.8), (x - w * 0.5, y - w * 0.35), (x, y - w), (x + w * 0.5, y - w * 0.35),
+           (x + w, y - w * 0.8), (x + w, y)]
+    pygame.draw.polygon(surf, GOLD, pts)
+    pygame.draw.polygon(surf, (180, 120, 10), pts, 2)
+    pygame.draw.circle(surf, (230, 40, 60), (int(x), int(y - w * 0.3)), max(2, int(w * 0.18)))
+
+
+def draw_monster_type(surf, sx, sy, t, f, ph, flash=False, scale=None):
+    """Σχεδιάζει οποιοδήποτε τέρας (και αρχηγό με στέμμα) με κέντρο τα πόδια στο (sx, sy)."""
+    scale = scale if scale is not None else t.get("scale", 1.0)
+    fn = DRAWERS[t["base"]]
+    col = t["color"] if t["boss"] else None
+    head_top = {"troll": 51, "ghost": 36, "spider": 18, "mummy": 36, "dragon": 36, "goblin": 34,
+                "slime": 20, "bat": 30}[t["base"]]
+    top = sy - head_top * scale
+    if abs(scale - 1.0) < 0.01:
+        fn(surf, sx, sy, f, ph, flash, col)
+    else:
+        tmp = pygame.Surface((130, 130), pygame.SRCALPHA)
+        fn(tmp, 65, 95, f, ph, flash, col)
+        sw, sh = int(130 * scale), int(130 * scale)
+        img = pygame.transform.scale(tmp, (sw, sh))
+        surf.blit(img, (sx - sw // 2, sy - int(95 * scale)))
+    if t["boss"]:
+        bob = math.sin(ph) * 5 * scale if t["base"] in ("ghost", "bat") else 0
+        draw_crown(surf, sx + (12 * f * scale if t["base"] in ("spider", "dragon") else 0), top + 4 * scale + bob, 9 * scale)
+
+
+# ---------------------------------------------------------------- ήχοι (φτιάχνονται με κώδικα)
+def _sq(f, t):
+    return 1.0 if (t * f) % 1 < 0.5 else -1.0
+
+
+def _tri(f, t):
+    return 4 * abs((t * f) % 1 - 0.5) - 1
+
+
+def _noise():
+    return random.uniform(-1, 1)
+
+
+class Sfx:
+    def __init__(self, on=True):
+        self.ok, self.on = False, on
+        self.snd, self.last = {}, {}
+        self.music_ch = None
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+            self.sr, _, self.ch = pygame.mixer.get_init()
+            pygame.mixer.set_num_channels(24)
+            self.build()
+            self.ok = True
+            self.music_ch = self.snd["music"].play(loops=-1)
+            if not self.on:
+                self.music_ch.pause()
+        except Exception as e:
+            print("Χωρίς ήχο:", e)
+
+    def make(self, dur, fn, vol):
+        n, sr, ch = int(self.sr * dur), self.sr, self.ch
+        a = array.array("h")
+        for i in range(n):
+            v = fn(i / sr, i / n)
+            s = int((1 if v > 1 else -1 if v < -1 else v) * vol * 32767)
+            if ch == 1:
+                a.append(s)
+            else:
+                a.extend([s] * ch)
+        return pygame.mixer.Sound(buffer=a.tobytes())
+
+    def build(self):
+        m = self.make
+        self.snd["shoot"] = m(0.12, lambda t, p: (_noise() * 0.6 + _sq(200 - 120 * p, t) * 0.4) * math.exp(-p * 5), 0.26)
+        self.snd["laser"] = m(0.10, lambda t, p: _sq(1400 - 900 * p, t) * (1 - p), 0.14)
+        self.snd["ally_shoot"] = m(0.10, lambda t, p: (_noise() * 0.6 + _sq(240 - 120 * p, t) * 0.3) * math.exp(-p * 6), 0.08)
+        self.snd["hit"] = m(0.07, lambda t, p: _sq(900 - 500 * p, t) * (1 - p), 0.18)
+        self.snd["poof"] = m(0.35, lambda t, p: (_tri(500 + 900 * p, t) * 0.6 + _noise() * 0.3) * (1 - p), 0.28)
+        self.snd["growl"] = m(0.55, lambda t, p: (2 * ((t * (55 + 12 * math.sin(t * 30))) % 1) - 1)
+                              * (0.5 + 0.5 * math.sin(t * 40)) * min(1, p * 8) * (1 - p), 0.36)
+        self.snd["boss"] = m(1.3, lambda t, p: ((2 * ((t * (40 + 20 * math.sin(t * 9))) % 1) - 1) * 0.7 + _noise() * 0.3)
+                             * min(1, p * 5) * (1 - p), 0.45)
+        self.snd["coin"] = m(0.09, lambda t, p: _sq(1320 if p < 0.4 else 1760, t) * (1 - p), 0.12)
+        notes = [784, 988, 1175, 1568]
+        self.snd["powerup"] = m(0.36, lambda t, p: _tri(notes[min(3, int(p * 4))] / 2, t) * (1 - (p * 4) % 1 * 0.6), 0.3)
+        album = [523, 659, 784, 1047, 784, 1047]
+        self.snd["album"] = m(0.6, lambda t, p: math.sin(6.283 * album[min(5, int(p * 6))] * t) * (1 - (p * 6) % 1 * 0.5), 0.3)
+        fan = [523, 523, 523, 659, 784, 0, 659, 784, 1047, 1047]
+        self.snd["fanfare"] = m(1.6, lambda t, p: _sq(fan[min(9, int(p * 10))], t) * 0.5 * (1 - (p * 10) % 1 * 0.5)
+                                if fan[min(9, int(p * 10))] else 0, 0.3)
+        self.snd["team"] = m(0.14, lambda t, p: math.sin(6.283 * (660 if p < 0.5 else 880) * t) * (1 - (p * 2) % 1), 0.13)
+        self.snd["hurt"] = m(0.12, lambda t, p: _sq(140, t) * (1 - p), 0.22)
+        self.snd["player_die"] = m(0.7, lambda t, p: _tri(500 * (1 - p) + 120, t) * (1 - p), 0.32)
+        self.snd["ally_die"] = m(0.25, lambda t, p: _tri(400 * (1 - p) + 120, t) * (1 - p), 0.14)
+        self.snd["flee"] = m(0.25, lambda t, p: _tri(500 + 700 * p, t) * (1 - p), 0.16)
+        self.snd["bark"] = m(0.32, lambda t, p: ((_sq(330 - 160 * ((p * 2) % 1), t) * 0.5 + _noise() * 0.5)
+                                                 * (1 - (p * 2) % 1) if (p * 2) % 1 < 0.6 else 0), 0.3)
+        self.snd["fire"] = m(0.3, lambda t, p: _noise() * (1 - p) * min(1, p * 10), 0.18)
+        sad = [523, 440, 392, 330]
+        self.snd["retry"] = m(1.0, lambda t, p: _tri(sad[min(3, int(p * 4))], t) * (1 - (p * 4) % 1 * 0.6), 0.28)
+
+        bass = [110, 110, 131, 110, 147, 147, 165, 98, 110, 110, 131, 165, 147, 131, 98, 98]
+        mel = [440, 0, 523, 587, 659, 0, 587, 523, 440, 0, 392, 440, 523, 0, 440, 0,
+               440, 0, 523, 587, 659, 784, 659, 587, 523, 0, 440, 392, 440, 0, 0, 0]
+
+        def music(t, p):
+            beat = int(t / 0.5)
+            tb = t - beat * 0.5
+            v = _sq(bass[beat % 16], t) * 0.20 * math.exp(-tb * 2.5)
+            v += math.sin(6.283 * (50 + 80 * math.exp(-tb * 30)) * tb) * math.exp(-tb * 12) * 0.45
+            th = tb - 0.25
+            if th >= 0:
+                v += _noise() * math.exp(-th * 80) * 0.10
+            e = int(t / 0.25)
+            te = t - e * 0.25
+            if mel[e % 32]:
+                v += _tri(mel[e % 32], t) * 0.13 * math.exp(-te * 4)
+            return v
+
+        self.snd["music"] = m(8.0, music, 0.5)
+        self.snd["music"].set_volume(0.3)
+
+    def play(self, name, gap=0.04):
+        if not (self.ok and self.on):
+            return
+        now = pygame.time.get_ticks() / 1000
+        if now - self.last.get(name, -9) < gap:
+            return
+        self.last[name] = now
+        self.snd[name].play()
+
+    def set_on(self, on):
+        self.on = on
+        if self.music_ch:
+            self.music_ch.unpause() if on else self.music_ch.pause()
+
+
+# ---------------------------------------------------------------- κόσμος
+class Solid:
+    def __init__(self, rect):
+        self.rect = rect
+        self.color = random.choice(BUILDING_COLORS)
+
+
+class Spot:
+    """Κρυψώνα για τέρατα."""
+
+    def __init__(self, x, y, kind, horiz=False):
+        self.x, self.y, self.kind, self.horiz = x, y, kind, horiz
+        self.color = random.choice(CAR_COLORS)
+        self.occupant = None
+
+    def eyes_pos(self):
+        if self.kind == "car":
+            return (self.x - 5, self.y - 14) if not self.horiz else (self.x + 9, self.y)
+        return self.x, self.y - 4
+
+
+class World:
+    def __init__(self, idx):
+        self.idx = idx
+        self.th = WORLDS[idx]
+        self.solids, self.parks, self.spots, self.trees = [], [], [], []
+        self.grid = {}
+        for bx in range(NB):
+            for by in range(NB):
+                blk = pygame.Rect(bx * BLOCK + ROAD, by * BLOCK + ROAD, BLOCK - ROAD, BLOCK - ROAD)
+                if (bx, by) == (MID, MID):
+                    self.parks.append(blk)
+                    self.plaza = blk
+                elif random.random() < self.th["park_chance"]:
+                    self.make_park(blk)
+                else:
+                    self.make_solids(blk, bx, by)
+        self.make_road_spots()
+        self.spots = [s for s in self.spots if math.hypot(s.x - HQ[0], s.y - HQ[1]) > 260]
+        self.build_nav()
+        self.render()
+
+    # ---------- κατασκευή
+    def make_park(self, blk):
+        self.parks.append(blk)
+        for _ in range(random.randint(3, 5)):
+            self.spots.append(Spot(*self.park_point(blk), self.th["park_spot"]))
+        for _ in range(random.randint(3, 5)):
+            x, y = self.park_point(blk)
+            self.trees.append((x, y, random.randint(28, 40)))
+
+    @staticmethod
+    def park_point(blk):
+        while True:
+            x = random.randint(blk.x + 35, blk.right - 35)
+            y = random.randint(blk.y + 35, blk.bottom - 35)
+            if abs(x - blk.centerx) > 38 and abs(y - blk.centery) > 38:
+                return x, y
+
+    def make_solids(self, blk, bx, by):
+        inner = blk.inflate(-2 * SIDEWALK, -2 * SIDEWALK)
+        mode = random.choice([1, 2, 2, 4, 4])
+        R = pygame.Rect
+        side = self.th["side_spots"]
+        if mode == 1:
+            rects = [inner]
+        elif mode == 2:
+            if random.random() < 0.5:
+                w = (inner.w - ALLEY) // 2
+                rects = [R(inner.x, inner.y, w, inner.h), R(inner.x + w + ALLEY, inner.y, inner.w - w - ALLEY, inner.h)]
+                self.spots.append(Spot(inner.x + w + ALLEY // 2, inner.centery + random.randint(-60, 60), random.choice(side)))
+            else:
+                h = (inner.h - ALLEY) // 2
+                rects = [R(inner.x, inner.y, inner.w, h), R(inner.x, inner.y + h + ALLEY, inner.w, inner.h - h - ALLEY)]
+                self.spots.append(Spot(inner.centerx + random.randint(-60, 60), inner.y + h + ALLEY // 2, random.choice(side)))
+        else:
+            w, h = (inner.w - ALLEY) // 2, (inner.h - ALLEY) // 2
+            rects = [R(inner.x, inner.y, w, h), R(inner.x + w + ALLEY, inner.y, inner.w - w - ALLEY, h),
+                     R(inner.x, inner.y + h + ALLEY, w, inner.h - h - ALLEY),
+                     R(inner.x + w + ALLEY, inner.y + h + ALLEY, inner.w - w - ALLEY, inner.h - h - ALLEY)]
+            self.spots.append(Spot(inner.centerx, inner.centery, random.choice(side)))
+        for r in rects:
+            self.solids.append(Solid(r))
+            self.grid.setdefault((bx, by), []).append(r)
+        for _ in range(random.randint(1, 2)):
+            s = random.choice("nsew")
+            if s == "n":
+                x, y = random.randint(blk.x + 25, blk.right - 25), blk.y + 15
+            elif s == "s":
+                x, y = random.randint(blk.x + 25, blk.right - 25), blk.bottom - 15
+            elif s == "w":
+                x, y = blk.x + 15, random.randint(blk.y + 25, blk.bottom - 25)
+            else:
+                x, y = blk.right - 15, random.randint(blk.y + 25, blk.bottom - 25)
+            self.spots.append(Spot(x, y, random.choice(side)))
+
+    def make_road_spots(self):
+        kind = self.th["road_spot"]
+        for i in range(NB + 1):
+            for j in range(NB):
+                lo, hi = j * BLOCK + ROAD + 45, (j + 1) * BLOCK - 45
+                if random.random() < 0.45:
+                    self.spots.append(Spot(i * BLOCK + random.choice((22, ROAD - 22)), random.randint(lo, hi), kind, False))
+                if random.random() < 0.45:
+                    self.spots.append(Spot(random.randint(lo, hi), i * BLOCK + random.choice((22, ROAD - 22)), kind, True))
+
+    # ---------- συγκρούσεις
+    def nearby(self, x, y):
+        bx, by = int(x // BLOCK), int(y // BLOCK)
+        for gx in (bx - 1, bx, bx + 1):
+            for gy in (by - 1, by, by + 1):
+                yield from self.grid.get((gx, gy), ())
+
+    def blocked(self, x, y, r):
+        if x < r or y < r or x > WORLD_W - r or y > WORLD_H - r:
+            return True
+        for rc in self.nearby(x, y):
+            if rc.left - r < x < rc.right + r and rc.top - r < y < rc.bottom + r:
+                return True
+        return False
+
+    def los(self, x1, y1, x2, y2, r=0):
+        b0, b1 = int(min(x1, x2) // BLOCK) - 1, int(max(x1, x2) // BLOCK) + 1
+        c0, c1 = int(min(y1, y2) // BLOCK) - 1, int(max(y1, y2) // BLOCK) + 1
+        for gx in range(b0, b1 + 1):
+            for gy in range(c0, c1 + 1):
+                for rc in self.grid.get((gx, gy), ()):
+                    if rc.inflate(2 * r, 2 * r).clipline(x1, y1, x2, y2):
+                        return False
+        return True
+
+    def build_nav(self):
+        self.gw = WORLD_W // NAV + 1
+        self.bad = set()
+        for b in self.solids:
+            r = b.rect.inflate(24, 24)
+            for cx in range(r.left // NAV, r.right // NAV + 1):
+                for cy in range(r.top // NAV, r.bottom // NAV + 1):
+                    if r.collidepoint(cx * NAV + NAV / 2, cy * NAV + NAV / 2):
+                        self.bad.add((cx, cy))
+
+    DIRS = [(1, 0, 1), (-1, 0, 1), (0, 1, 1), (0, -1, 1), (1, 1, 1.41), (1, -1, 1.41), (-1, 1, 1.41), (-1, -1, 1.41)]
+
+    def find_path(self, sx, sy, tx, ty):
+        s, g = (int(sx // NAV), int(sy // NAV)), (int(tx // NAV), int(ty // NAV))
+        if s == g:
+            return [(tx, ty)]
+        h = lambda c: math.hypot(c[0] - g[0], c[1] - g[1])
+        openq, cost, prev = [(h(s), 0, s)], {s: 0}, {s: None}
+        n_iter = 0
+        while openq and n_iter < 3000:
+            n_iter += 1
+            _, gc, c = heapq.heappop(openq)
+            if c == g:
+                break
+            if gc > cost[c]:
+                continue
+            for dx, dy, k in self.DIRS:
+                n = (c[0] + dx, c[1] + dy)
+                if not (0 <= n[0] < self.gw and 0 <= n[1] < self.gw):
+                    continue
+                if n in self.bad and n != g:
+                    continue
+                if dx and dy and ((c[0] + dx, c[1]) in self.bad or (c[0], c[1] + dy) in self.bad):
+                    continue
+                ng = gc + k
+                if ng < cost.get(n, 1e9):
+                    cost[n], prev[n] = ng, c
+                    heapq.heappush(openq, (ng + h(n), ng, n))
+        if g not in prev:
+            return [(tx, ty)]
+        path, c = [], g
+        while c != s:
+            path.append((c[0] * NAV + NAV / 2, c[1] * NAV + NAV / 2))
+            c = prev[c]
+        path.reverse()
+        path[-1] = (tx, ty)
+        return path
+
+    def random_street_point(self):
+        i = random.randint(0, NB)
+        along = random.randint(60, WORLD_W - 60)
+        across = i * BLOCK + ROAD // 2
+        return (across, along) if random.random() < 0.5 else (along, across)
+
+    # ---------- σχέδιο (μία φορά)
+    def render(self):
+        th = self.th
+        bg = pygame.Surface((WORLD_W, WORLD_H))
+        bg.fill(th["road"])
+        key = th["key"]
+        rnd = random.Random(self.idx * 99)
+        # υφή δρόμων
+        for _ in range(2500):
+            x, y = rnd.randint(0, WORLD_W), rnd.randint(0, WORLD_H)
+            pygame.draw.circle(bg, shade(th["road"], rnd.choice((0.9, 1.08))), (x, y), rnd.randint(1, 3))
+        if key == "city":
+            for i in range(NB + 1):
+                c = i * BLOCK + ROAD // 2
+                for t in range(0, WORLD_W, 50):
+                    if (t % BLOCK) >= ROAD and ((t + 25) % BLOCK) >= ROAD:
+                        pygame.draw.line(bg, (220, 220, 200), (c, t), (c, t + 25), 3)
+                        pygame.draw.line(bg, (220, 220, 200), (t, c), (t + 25, c), 3)
+            for i in range(NB + 1):
+                for j in range(NB + 1):
+                    X, Y = i * BLOCK, j * BLOCK
+                    for k in range(X + 12, X + ROAD - 8, 14):
+                        pygame.draw.rect(bg, (230, 230, 230), (k, Y - 24, 7, 18))
+                        pygame.draw.rect(bg, (230, 230, 230), (k, Y + ROAD + 6, 7, 18))
+                    for k in range(Y + 12, Y + ROAD - 8, 14):
+                        pygame.draw.rect(bg, (230, 230, 230), (X - 24, k, 18, 7))
+                        pygame.draw.rect(bg, (230, 230, 230), (X + ROAD + 6, k, 18, 7))
+        elif key == "haunted":
+            for x in range(0, WORLD_W, 26):
+                for y in range(0, WORLD_H, 20):
+                    if (x % BLOCK < ROAD) or (y % BLOCK < ROAD):
+                        pygame.draw.rect(bg, shade(th["road"], 0.8), (x + (y // 20 % 2) * 13, y, 26, 20), 1)
+        # τετράγωνα
+        for bx in range(NB):
+            for by in range(NB):
+                blk = pygame.Rect(bx * BLOCK + ROAD, by * BLOCK + ROAD, BLOCK - ROAD, BLOCK - ROAD)
+                pygame.draw.rect(bg, th["ground"], blk)
+                pygame.draw.rect(bg, shade(th["ground"], 0.8), blk, 3)
+                for _ in range(25):
+                    x, y = rnd.randint(blk.x, blk.right), rnd.randint(blk.y, blk.bottom)
+                    pygame.draw.circle(bg, shade(th["ground"], rnd.choice((0.92, 1.06))), (x, y), rnd.randint(2, 4))
+        for p in self.parks:
+            self.draw_park(bg, p, rnd)
+        for b in self.solids:
+            pygame.draw.rect(bg, shade(th["ground"], 0.78), b.rect.move(8, 8))
+        for b in self.solids:
+            SOLID_DRAW[th["solid"]](bg, b, rnd)
+        for x, y, r in self.trees:
+            if th["tree"] not in ("dead",):
+                pygame.draw.circle(bg, (90, 60, 30), (x, y), 8)
+        for s in self.spots:
+            draw_spot(bg, s)
+        self.bg = bg.convert() if pygame.display.get_surface() else bg
+
+        size = 150
+        k = size / WORLD_W
+        mm = pygame.Surface((size, size))
+        mm.fill(shade(th["road"], 0.9))
+        for bx in range(NB):
+            for by in range(NB):
+                pygame.draw.rect(mm, shade(th["ground"], 0.85), (int((bx * BLOCK + ROAD) * k), int((by * BLOCK + ROAD) * k),
+                                                              int((BLOCK - ROAD) * k) + 1, int((BLOCK - ROAD) * k) + 1))
+        for p in self.parks:
+            pygame.draw.rect(mm, shade(th["park"], 0.85), (int(p.x * k), int(p.y * k), int(p.w * k) + 1, int(p.h * k) + 1))
+        for b in self.solids:
+            r = b.rect
+            pygame.draw.rect(mm, (45, 45, 50), (int(r.x * k), int(r.y * k), int(r.w * k) + 1, int(r.h * k) + 1))
+        self.minimap = mm
+
+    def draw_park(self, bg, p, rnd):
+        th, key = self.th, self.th["key"]
+        g = p.inflate(-20, -20)
+        pygame.draw.rect(bg, th["park"], g, border_radius=10)
+        path = shade(th["park"], 1.15) if key in ("beach", "snow") else (205, 185, 140)
+        if key == "haunted":
+            path = (90, 85, 80)
+        pygame.draw.rect(bg, path, (g.x, g.centery - 12, g.w, 24))
+        pygame.draw.rect(bg, path, (g.centerx - 12, g.y, 24, g.h))
+        pygame.draw.circle(bg, path, g.center, 36)
+        c = g.center
+        if key == "city":
+            pygame.draw.circle(bg, (120, 170, 220), c, 22)
+            pygame.draw.circle(bg, (180, 210, 240), c, 10)
+        elif key == "forest":
+            pygame.draw.circle(bg, (90, 150, 200), c, 24)
+            for _ in range(30):
+                x, y = rnd.randint(g.x + 5, g.right - 5), rnd.randint(g.y + 5, g.bottom - 5)
+                pygame.draw.circle(bg, rnd.choice([(250, 220, 60), (240, 120, 160), (255, 255, 255)]), (x, y), 3)
+        elif key == "beach":
+            pygame.draw.circle(bg, (60, 170, 210), c, 30)
+            pygame.draw.circle(bg, (120, 210, 235), c, 20)
+            for _ in range(6):
+                x, y = rnd.randint(g.x + 10, g.right - 40), rnd.randint(g.y + 10, g.bottom - 20)
+                pygame.draw.rect(bg, rnd.choice([(230, 70, 70), (70, 130, 230), (250, 200, 50)]), (x, y, 30, 14), border_radius=3)
+        elif key == "snow":
+            pygame.draw.circle(bg, (170, 215, 240), c, 30)
+            pygame.draw.line(bg, WHITE, (c[0] - 15, c[1] - 8), (c[0] + 10, c[1] + 6), 2)
+        elif key == "haunted":
+            pygame.draw.rect(bg, (110, 105, 110), (c[0] - 12, c[1] - 20, 24, 34), border_top_left_radius=12,
+                             border_top_right_radius=12)
+            pygame.draw.line(bg, (60, 60, 60), (c[0], c[1] - 14), (c[0], c[1]), 3)
+            pygame.draw.line(bg, (60, 60, 60), (c[0] - 6, c[1] - 9), (c[0] + 6, c[1] - 9), 3)
+        if p is not getattr(self, "plaza", None) or True:
+            for _ in range(30):
+                x, y = rnd.randint(g.x + 5, g.right - 5), rnd.randint(g.y + 5, g.bottom - 5)
+                pygame.draw.line(bg, shade(th["park"], 0.85), (x, y), (x + 3, y - 6), 2)
+
+
+# ---------------------------------------------------------------- σχέδια για εμπόδια
+def _face(r, h=42):
+    face_h = min(h, r.h // 3)
+    return pygame.Rect(r.x, r.y, r.w, r.h - face_h), pygame.Rect(r.x, r.bottom - face_h, r.w, face_h)
+
+
+def solid_building(bg, b, rnd):
+    r, base = b.rect, b.color
+    roof, face = _face(r)
+    pygame.draw.rect(bg, base, roof)
+    pygame.draw.rect(bg, shade(base, 1.18), roof, 5)
+    for _ in range(rnd.randint(1, 3)):
+        w, h = rnd.randint(16, 30), rnd.randint(12, 22)
+        x = rnd.randint(roof.x + 10, max(roof.x + 11, roof.right - w - 10))
+        y = rnd.randint(roof.y + 10, max(roof.y + 11, roof.bottom - h - 10))
+        pygame.draw.rect(bg, (150, 150, 155), (x, y, w, h))
+        pygame.draw.rect(bg, (90, 90, 95), (x, y, w, h), 2)
+    pygame.draw.rect(bg, shade(base, 0.6), face)
+    for wx in range(r.x + 10, r.right - 18, 22):
+        col = (250, 230, 140) if rnd.random() < 0.3 else (170, 205, 235)
+        pygame.draw.rect(bg, col, (wx, face.y + 8, 12, 12))
+        pygame.draw.rect(bg, (40, 40, 40), (wx, face.y + 8, 12, 12), 1)
+    pygame.draw.rect(bg, (100, 65, 35), (r.centerx - 8, r.bottom - 20, 16, 20))
+    pygame.draw.rect(bg, (30, 30, 30), r, 2)
+
+
+def solid_grove(bg, b, rnd):
+    r = b.rect
+    pygame.draw.rect(bg, (30, 80, 35), r, border_radius=18)
+    for x in range(r.x + 18, r.right - 10, 34):
+        for y in range(r.y + 18, r.bottom - 10, 34):
+            cx, cy = x + rnd.randint(-6, 6), y + rnd.randint(-6, 6)
+            rr = rnd.randint(20, 27)
+            pygame.draw.circle(bg, rnd.choice([(35, 95, 40), (45, 110, 45), (30, 85, 38)]), (cx, cy), rr)
+            pygame.draw.circle(bg, (60, 130, 55), (cx - 6, cy - 7), rr // 3)
+    pygame.draw.rect(bg, (20, 55, 25), r, 3, border_radius=18)
+
+
+def solid_hut(bg, b, rnd):
+    r = b.rect
+    roof, face = _face(r, 36)
+    pygame.draw.rect(bg, (220, 185, 90), roof)
+    for y in range(roof.y + 4, roof.bottom, 9):
+        pygame.draw.line(bg, (185, 150, 60), (roof.x, y), (roof.right, y + 3), 3)
+    pygame.draw.rect(bg, (160, 110, 60), face)
+    for x in range(face.x, face.right, 12):
+        pygame.draw.line(bg, (125, 85, 45), (x, face.y), (x, face.bottom), 2)
+    for wx in range(r.x + 16, r.right - 30, 46):
+        pygame.draw.rect(bg, (100, 190, 230), (wx, face.y + 8, 16, 12))
+    pygame.draw.rect(bg, (90, 60, 30), (r.centerx - 9, r.bottom - 22, 18, 22))
+    pygame.draw.rect(bg, (90, 60, 25), r, 2)
+
+
+def solid_cabin(bg, b, rnd):
+    r = b.rect
+    roof, face = _face(r, 40)
+    pygame.draw.rect(bg, (245, 248, 255), roof, border_radius=6)
+    pygame.draw.rect(bg, (205, 220, 240), roof, 6, border_radius=6)
+    pygame.draw.rect(bg, (120, 80, 50), face)
+    for y in range(face.y + 4, face.bottom, 8):
+        pygame.draw.line(bg, (90, 60, 35), (face.x, y), (face.right, y), 2)
+    for x in range(face.x + 4, face.right - 4, 10):
+        pygame.draw.polygon(bg, (210, 235, 255), [(x, face.y), (x + 6, face.y), (x + 3, face.y + rnd.randint(6, 12))])
+    for wx in range(r.x + 16, r.right - 30, 40):
+        pygame.draw.rect(bg, (255, 220, 120), (wx, face.y + 14, 14, 12))
+    pygame.draw.rect(bg, (70, 45, 25), (r.centerx - 9, r.bottom - 22, 18, 22))
+    pygame.draw.rect(bg, (70, 60, 60), r, 2)
+
+
+def solid_crypt(bg, b, rnd):
+    r = b.rect
+    roof, face = _face(r, 42)
+    pygame.draw.rect(bg, (78, 72, 92), roof)
+    for _ in range(4):
+        x, y = rnd.randint(roof.x + 5, roof.right - 5), rnd.randint(roof.y + 5, roof.bottom - 5)
+        pygame.draw.line(bg, (50, 45, 60), (x, y), (x + rnd.randint(-25, 25), y + rnd.randint(-25, 25)), 2)
+    pygame.draw.rect(bg, (100, 95, 115), roof, 5)
+    pygame.draw.rect(bg, (45, 40, 55), face)
+    for wx in range(r.x + 12, r.right - 22, 30):
+        pygame.draw.rect(bg, (190, 120, 255) if rnd.random() < 0.5 else (60, 40, 90), (wx, face.y + 10, 12, 18),
+                         border_top_left_radius=6, border_top_right_radius=6)
+    pygame.draw.rect(bg, (30, 20, 30), (r.centerx - 10, r.bottom - 26, 20, 26), border_top_left_radius=10,
+                     border_top_right_radius=10)
+    pygame.draw.line(bg, (200, 200, 210), (r.x, r.y), (r.x + 22, r.y + 22), 1)
+    pygame.draw.line(bg, (200, 200, 210), (r.x + 22, r.y), (r.x, r.y + 22), 1)
+    pygame.draw.rect(bg, (25, 20, 30), r, 2)
+
+
+SOLID_DRAW = {"building": solid_building, "grove": solid_grove, "hut": solid_hut, "cabin": solid_cabin,
+              "crypt": solid_crypt}
+
+
+# ---------------------------------------------------------------- σχέδια για κρυψώνες
+def _rot_blit(bg, img, x, y, horiz):
+    if horiz:
+        img = pygame.transform.rotate(img, 90)
+    bg.blit(img, (x - img.get_width() // 2, y - img.get_height() // 2))
+
+
+def draw_spot(bg, s):
+    x, y, k = s.x, s.y, s.kind
+    if k == "bush":
+        for dx, dy in ((-12, 4), (12, 4), (0, -8)):
+            pygame.draw.circle(bg, (40, 130, 50), (x + dx, y + dy), 20)
+        pygame.draw.circle(bg, (55, 155, 60), (x, y), 15)
+    elif k == "bin":
+        pygame.draw.rect(bg, (40, 90, 55), (x - 11, y - 12, 22, 24), border_radius=4)
+        pygame.draw.rect(bg, (60, 120, 75), (x - 11, y - 12, 22, 8), border_radius=4)
+        pygame.draw.rect(bg, (20, 50, 30), (x - 11, y - 12, 22, 24), 2, border_radius=4)
+    elif k == "mushroom":
+        pygame.draw.rect(bg, (240, 230, 210), (x - 6, y - 4, 12, 18), border_radius=4)
+        pygame.draw.ellipse(bg, (220, 50, 50), (x - 22, y - 20, 44, 26))
+        for dx, dy in ((-10, -12), (6, -14), (0, -6), (13, -8)):
+            pygame.draw.circle(bg, WHITE, (x + dx, y + dy), 3)
+    elif k == "sandcastle":
+        c = (215, 180, 110)
+        pygame.draw.rect(bg, c, (x - 20, y - 8, 40, 20))
+        for dx in (-20, 6):
+            pygame.draw.rect(bg, c, (x + dx, y - 22, 14, 16))
+            for i in range(3):
+                pygame.draw.rect(bg, c, (x + dx + i * 5, y - 26, 4, 4))
+        pygame.draw.line(bg, (90, 60, 30), (x + 13, y - 26), (x + 13, y - 38), 2)
+        pygame.draw.polygon(bg, (230, 50, 50), [(x + 13, y - 38), (x + 22, y - 35), (x + 13, y - 32)])
+    elif k == "umbrella":
+        pygame.draw.line(bg, (90, 60, 30), (x, y), (x, y + 14), 3)
+        cols = [(230, 60, 60), WHITE]
+        for i in range(8):
+            a1, a2 = i * math.pi / 4, (i + 1) * math.pi / 4
+            pygame.draw.polygon(bg, cols[i % 2], [(x, y), (x + math.cos(a1) * 26, y + math.sin(a1) * 26),
+                                                  (x + math.cos(a2) * 26, y + math.sin(a2) * 26)])
+        pygame.draw.circle(bg, (90, 60, 30), (x, y), 3)
+    elif k == "snowman":
+        pygame.draw.circle(bg, WHITE, (x, y + 4), 15)
+        pygame.draw.circle(bg, WHITE, (x, y - 16), 10)
+        pygame.draw.circle(bg, (180, 195, 215), (x, y + 4), 15, 2)
+        pygame.draw.circle(bg, (20, 20, 20), (x - 3, y - 18), 2)
+        pygame.draw.circle(bg, (20, 20, 20), (x + 3, y - 18), 2)
+        pygame.draw.polygon(bg, (240, 130, 30), [(x, y - 15), (x + 10, y - 13), (x, y - 12)])
+        pygame.draw.rect(bg, (30, 30, 30), (x - 8, y - 32, 16, 8))
+        pygame.draw.line(bg, (210, 50, 50), (x - 9, y - 8), (x + 9, y - 8), 4)
+    elif k == "snowpile":
+        for dx, dy, r in ((-12, 4, 16), (12, 4, 15), (0, -8, 17)):
+            pygame.draw.circle(bg, (200, 215, 235), (x + dx, y + dy + 2), r)
+            pygame.draw.circle(bg, WHITE, (x + dx, y + dy), r)
+    elif k == "pumpkin":
+        for dx in (-9, 9, 0):
+            pygame.draw.ellipse(bg, (240, 130, 20), (x - 12 + dx, y - 14, 24, 28))
+        pygame.draw.ellipse(bg, (200, 100, 10), (x - 12, y - 14, 24, 28), 2)
+        pygame.draw.rect(bg, (60, 100, 30), (x - 3, y - 20, 6, 8))
+        pygame.draw.polygon(bg, (60, 30, 0), [(x - 10, y + 2), (x + 10, y + 2), (x, y + 9)])
+    elif k == "tomb":
+        pygame.draw.rect(bg, (120, 120, 130), (x - 14, y - 20, 28, 34), border_top_left_radius=14, border_top_right_radius=14)
+        pygame.draw.rect(bg, (80, 80, 90), (x - 14, y - 20, 28, 34), 2, border_top_left_radius=14, border_top_right_radius=14)
+        pygame.draw.line(bg, (70, 70, 80), (x - 7, y - 6), (x + 7, y - 6), 2)
+        pygame.draw.line(bg, (70, 70, 80), (x - 7, y), (x + 5, y), 2)
+        pygame.draw.ellipse(bg, (60, 50, 40), (x - 18, y + 10, 36, 10))
+    elif k == "car":
+        w, h = (60, 32) if s.horiz else (32, 60)
+        body = pygame.Rect(0, 0, w, h)
+        body.center = (x, y)
+        wheels = ((body.left + 10, body.top), (body.right - 10, body.top), (body.left + 10, body.bottom),
+                  (body.right - 10, body.bottom)) if s.horiz else \
+            ((body.left, body.top + 10), (body.right, body.top + 10), (body.left, body.bottom - 10),
+             (body.right, body.bottom - 10))
+        for cx, cy in wheels:
+            pygame.draw.rect(bg, (20, 20, 20), (cx - 6, cy - 4, 12, 8) if s.horiz else (cx - 4, cy - 6, 8, 12))
+        pygame.draw.rect(bg, s.color, body, border_radius=9)
+        lighter = tuple(min(255, c + 40) for c in s.color)
+        glass = (60, 80, 120)
+        if s.horiz:
+            pygame.draw.rect(bg, lighter, (x - 14, y - 12, 28, 24), border_radius=4)
+            pygame.draw.rect(bg, glass, (x + 14, y - 12, 9, 24), border_radius=3)
+            pygame.draw.rect(bg, glass, (x - 22, y - 11, 7, 22), border_radius=3)
+        else:
+            pygame.draw.rect(bg, lighter, (x - 12, y - 10, 24, 26), border_radius=4)
+            pygame.draw.rect(bg, glass, (x - 12, y - 21, 24, 10), border_radius=3)
+            pygame.draw.rect(bg, glass, (x - 11, y + 16, 22, 7), border_radius=3)
+        pygame.draw.rect(bg, (25, 25, 25), body, 2, border_radius=9)
+    else:
+        img = pygame.Surface((44, 70), pygame.SRCALPHA)
+        if k == "log":
+            pygame.draw.rect(img, (125, 85, 45), (8, 4, 28, 62), border_radius=10)
+            for yy in range(12, 60, 10):
+                pygame.draw.line(img, (95, 60, 30), (10, yy), (34, yy + 2), 2)
+            pygame.draw.ellipse(img, (210, 170, 110), (8, 2, 28, 14))
+            pygame.draw.ellipse(img, (150, 110, 60), (14, 5, 16, 8), 2)
+        elif k == "boat":
+            pygame.draw.polygon(img, (200, 70, 50), [(22, 2), (38, 22), (38, 64), (6, 64), (6, 22)])
+            pygame.draw.polygon(img, (240, 240, 240), [(22, 8), (33, 24), (33, 58), (11, 58), (11, 24)])
+            pygame.draw.line(img, (140, 90, 40), (11, 36), (33, 36), 4)
+            pygame.draw.line(img, (140, 90, 40), (11, 48), (33, 48), 4)
+        elif k == "sled":
+            pygame.draw.line(img, (80, 80, 90), (8, 4), (8, 66), 3)
+            pygame.draw.line(img, (80, 80, 90), (36, 4), (36, 66), 3)
+            pygame.draw.rect(img, (200, 50, 50), (10, 12, 24, 48), border_radius=4)
+            for yy in range(18, 56, 10):
+                pygame.draw.line(img, (150, 30, 30), (10, yy), (34, yy), 2)
+        elif k == "coffin":
+            pts = [(14, 2), (30, 2), (40, 18), (32, 68), (12, 68), (4, 18)]
+            pygame.draw.polygon(img, (90, 55, 40), pts)
+            pygame.draw.polygon(img, (50, 30, 20), pts, 3)
+            pygame.draw.line(img, (210, 190, 150), (22, 18), (22, 44), 3)
+            pygame.draw.line(img, (210, 190, 150), (14, 26), (30, 26), 3)
+        _rot_blit(bg, img, x, y, s.horiz)
+
+
+def draw_tree(surf, kind, sx, sy, r):
+    if kind == "round":
+        pygame.draw.circle(surf, (30, 95, 40), (sx, sy - 8), r)
+        pygame.draw.circle(surf, (45, 120, 50), (sx - 9, sy - 16), r // 2)
+    elif kind == "round_dark":
+        pygame.draw.circle(surf, (25, 80, 32), (sx, sy - 8), r + 4)
+        pygame.draw.circle(surf, (40, 105, 45), (sx - 9, sy - 16), r // 2)
+    elif kind == "palm":
+        pygame.draw.line(surf, (140, 100, 55), (sx, sy), (sx + 6, sy - 40), 6)
+        for a in range(0, 360, 60):
+            ra = math.radians(a)
+            ex, ey = sx + 6 + math.cos(ra) * (r + 6), sy - 40 + math.sin(ra) * (r * 0.6)
+            pygame.draw.line(surf, (40, 140, 60), (sx + 6, sy - 40), (ex, ey), 8)
+        pygame.draw.circle(surf, (110, 70, 30), (sx + 6, sy - 38), 5)
+    elif kind == "pine":
+        for i, w in enumerate((r, r * 0.75, r * 0.5)):
+            yb = sy - i * 18
+            pygame.draw.polygon(surf, (30, 90, 55), [(sx - w, yb), (sx + w, yb), (sx, yb - 30)])
+            pygame.draw.polygon(surf, WHITE, [(sx - w * 0.35, yb - 20), (sx + w * 0.35, yb - 20), (sx, yb - 30)])
+    elif kind == "dead":
+        c = (60, 45, 40)
+        pygame.draw.line(surf, c, (sx, sy + 8), (sx, sy - 40), 6)
+        for dx, dy, ex, ey in ((0, -20, -22, -42), (0, -28, 20, -50), (0, -36, -8, -60), (-12, -32, -26, -36)):
+            pygame.draw.line(surf, c, (sx + dx, sy + dy), (sx + ex, sy + ey), 3)
+
+
+# ---------------------------------------------------------------- κινούμενα
+class Mover:
+    path = None
+    path_t = 0.0
+    fly = False
+
+    def steer(self, world, tx, ty, speed, dt):
+        if math.hypot(tx - self.x, ty - self.y) < 3:
+            return False
+        if self.fly or world.los(self.x, self.y, tx, ty, self.r * 0.8):
+            self.path = None
+            dest = (tx, ty)
+        else:
+            self.path_t -= dt
+            if self.path is None or self.path_t <= 0:
+                self.path = world.find_path(self.x, self.y, tx, ty)
+                self.path_t = 0.5 + random.random() * 0.4
+            while len(self.path) > 1 and math.hypot(self.path[0][0] - self.x, self.path[0][1] - self.y) < 22:
+                self.path.pop(0)
+            dest = self.path[0] if self.path else (tx, ty)
+        dx, dy = dest[0] - self.x, dest[1] - self.y
+        l = math.hypot(dx, dy)
+        if l < 0.5:
+            return False
+        step = min(speed, l)
+        nx, ny = self.x + dx / l * step, self.y + dy / l * step
+        if self.fly:
+            self.x = min(max(nx, 20), WORLD_W - 20)
+            self.y = min(max(ny, 20), WORLD_H - 20)
+        elif not world.blocked(nx, ny, self.r):
+            self.x, self.y = nx, ny
+        elif not world.blocked(nx, self.y, self.r):
+            self.x = nx
+        elif not world.blocked(self.x, ny, self.r):
+            self.y = ny
+        else:
+            self.path_t = 0
+        self.dir = math.atan2(dy, dx)
+        return True
+
+
+class Human(Mover):
+    def __init__(self, x, y, is_player=False, role="escort"):
+        self.x, self.y, self.r = x, y, 16
+        self.is_player = is_player
+        self.maxhp = PLAYER_MAX_HP if is_player else ALLY_MAX_HP
+        self.hp = self.maxhp
+        self.dir, self.cool, self.walk = 0.0, 0.0, 0.0
+        self.moving = False
+        self.invuln = 1.5
+        self.alive, self.respawn = True, 0.0
+        self.shirt = (40, 110, 220) if is_player else random.choice(SHIRTS)
+        self.helmet = (60, 90, 60) if is_player else random.choice(HELMETS)
+        self.name = "Εσύ" if is_player else random.choice(NAMES)
+        self.role = role
+        self.slot = random.random() * 6.283
+        self.goal, self.goal_t = None, 0.0
+        self.shield_t = self.speed_t = self.magnet_t = 0.0
+
+    def protected(self):
+        return self.invuln > 0 or self.shield_t > 0
+
+    def gun_tip(self):
+        return self.x + math.cos(self.dir) * 34, self.y - 8 + math.sin(self.dir) * 34
+
+    def draw(self, surf, cam, t):
+        sx, sy = int(self.x - cam[0]), int(self.y - cam[1])
+        if self.invuln > 0 and int(self.invuln * 10) % 2 == 0:
+            return
+        if self.speed_t > 0 and self.moving:
+            for i in range(3):
+                pygame.draw.circle(surf, (255, 255, 160), (sx - int(math.cos(self.dir) * (14 + i * 9)),
+                                                           sy + 18 - int(math.sin(self.dir) * (14 + i * 9))), 4 - i)
+        draw_hero(surf, sx, sy, self.dir, self.walk if self.moving else None, self.shirt, self.helmet)
+        if self.shield_t > 0:
+            pygame.draw.circle(surf, (120, 200, 255), (sx, sy - 6), 34, 3)
+            pygame.draw.circle(surf, (200, 240, 255), (sx, sy - 6), 30 + int(math.sin(t * 8) * 2), 1)
+        if self.is_player:
+            bob = int(math.sin(t * 5) * 3)
+            pts = [(sx - 9, sy - 54 + bob), (sx + 9, sy - 54 + bob), (sx, sy - 43 + bob)]
+            pygame.draw.polygon(surf, (255, 220, 40), pts)
+            pygame.draw.polygon(surf, (0, 0, 0), pts, 1)
+        elif self.hp < self.maxhp:
+            pygame.draw.rect(surf, (60, 0, 0), (sx - 15, sy - 46, 30, 4))
+            pygame.draw.rect(surf, (80, 220, 90), (sx - 15, sy - 46, int(30 * self.hp / self.maxhp), 4))
+
+
+class Dog(Mover):
+    def __init__(self, x, y):
+        self.x, self.y, self.r = x, y, 12
+        self.dir, self.walk = 0.0, 0.0
+        self.moving, self.barking = False, 0.0
+        self.target = None        # κρυψώνα με τέρας που βρήκε
+        self.bark_t = 0.0
+
+    def draw(self, surf, cam, t):
+        sx, sy = int(self.x - cam[0]), int(self.y - cam[1])
+        f = 1 if math.cos(self.dir) >= 0 else -1
+        draw_dog(surf, sx, sy, f, self.walk, self.moving, self.barking > 0)
+
+
+class Monster(Mover):
+    def __init__(self, spot, mtype, x=None, y=None):
+        self.t = mtype
+        self.boss = mtype["boss"]
+        self.fly = mtype.get("fly", False)
+        self.spot = spot
+        if spot:
+            self.x, self.y = spot.x, spot.y
+            spot.occupant = self
+            self.state = "hidden"
+        else:
+            self.x, self.y = x, y
+            self.state = "chase"
+        self.hp, self.r = mtype["hp"], mtype["r"]
+        self.flash, self.lost, self.slow_t = 0.0, 0.0, 0.0
+        self.wobble = random.random() * 6.28
+        self.dir, self.face = 0.0, 1
+        self.fled = self.boss
+        self.shoot_t = random.uniform(1, 2.5)
+        self.summon_t = 6.0
+
+    def hit_center(self):
+        return self.x, self.y - self.r * 0.5
+
+    def draw(self, surf, cam, t):
+        sx, sy = int(self.x - cam[0]), int(self.y - cam[1])
+        draw_monster_type(surf, sx, sy, self.t, self.face, self.wobble, self.flash > 0)
+        if self.slow_t > 0:
+            pygame.draw.circle(surf, (150, 225, 255), (sx, sy - int(self.r * 0.5)), self.r + 6, 2)
+            for i in range(3):
+                a = t * 3 + i * 2.1
+                pygame.draw.circle(surf, WHITE, (sx + int(math.cos(a) * self.r), sy - int(self.r * 0.5) + int(math.sin(a) * self.r)), 2)
+        if self.hp < self.t["hp"] and not self.boss:
+            w = self.r * 2
+            top = sy - int(self.r * 2.6) - 10
+            pygame.draw.rect(surf, (60, 0, 0), (sx - self.r, top, w, 5))
+            pygame.draw.rect(surf, (230, 40, 40), (sx - self.r, top, int(w * self.hp / self.t["hp"]), 5))
+
+
+class Bullet:
+    def __init__(self, x, y, angle, owner, weapon):
+        self.x, self.y, self.owner = x, y, owner
+        self.vx = math.cos(angle) * BULLET_SPEED
+        self.vy = math.sin(angle) * BULLET_SPEED
+        self.life = 1.0
+        self.dmg = weapon["dmg"]
+        self.pierce = weapon.get("pierce", False)
+        self.freeze = weapon.get("freeze", False)
+        self.color = weapon["color"] if owner == "player" else (255, 170, 80)
+        self.hit = set()
+
+    def update(self, dt):
+        self.x += self.vx
+        self.y += self.vy
+        self.life -= dt
+        return self.life > 0 and 0 < self.x < WORLD_W and 0 < self.y < WORLD_H
+
+    def draw(self, surf, cam):
+        x, y = int(self.x - cam[0]), int(self.y - cam[1])
+        if self.pierce:
+            pygame.draw.line(surf, self.color, (x, y), (int(x - self.vx * 2), int(y - self.vy * 2)), 5)
+            pygame.draw.line(surf, WHITE, (x, y), (int(x - self.vx * 2), int(y - self.vy * 2)), 2)
+        else:
+            pygame.draw.circle(surf, self.color, (x, y), 5 if self.owner == "player" else 4)
+            if self.freeze:
+                pygame.draw.circle(surf, WHITE, (x, y), 2)
+
+
+class Shot:
+    """Βολή τέρατος (φωτιά, πέτρα, ιστός, πάγος...)."""
+
+    def __init__(self, x, y, angle, speed, dmg, color, ghost=False):
+        self.x, self.y = x, y
+        self.vx, self.vy = math.cos(angle) * speed, math.sin(angle) * speed
+        self.dmg, self.color, self.ghost = dmg, color, ghost
+        self.life = 3.0
+
+    def update(self, dt):
+        self.x += self.vx
+        self.y += self.vy
+        self.life -= dt
+        return self.life > 0
+
+    def draw(self, surf, cam, t):
+        x, y = int(self.x - cam[0]), int(self.y - cam[1])
+        pygame.draw.circle(surf, shade(self.color, 0.7), (x, y), 10)
+        pygame.draw.circle(surf, self.color, (x, y), 7 + int(math.sin(t * 20) * 1))
+        pygame.draw.circle(surf, WHITE, (x - 2, y - 2), 3)
+
+
+class Coin:
+    """Κύπελλο που πέφτει από τέρας και το μαζεύεις."""
+
+    def __init__(self, x, y, delay=0.0):
+        a, s = random.random() * 6.283, random.uniform(2, 5)
+        self.x, self.y = x, y
+        self.vx, self.vy = math.cos(a) * s, math.sin(a) * s
+        self.t = 0.0
+        self.delay = delay
+
+    def draw(self, surf, cam, t):
+        x, y = int(self.x - cam[0]), int(self.y - cam[1] + math.sin(t * 6 + self.x) * 3)
+        draw_trophy(surf, x, y, 0.8)
+
+
+POWER_KINDS = ["heart", "shield", "shoes", "magnet"]
+POWER_NAMES = {"heart": "Καρδιά!", "shield": "Ασπίδα!", "shoes": "Παπούτσια ταχύτητας!", "magnet": "Μαγνήτης!"}
+
+
+def draw_power_icon(surf, kind, x, y, s=1.0):
+    if kind == "heart":
+        pygame.draw.circle(surf, (230, 40, 70), (int(x - 6 * s), int(y - 3 * s)), int(7 * s))
+        pygame.draw.circle(surf, (230, 40, 70), (int(x + 6 * s), int(y - 3 * s)), int(7 * s))
+        pygame.draw.polygon(surf, (230, 40, 70), [(x - 13 * s, y - 1 * s), (x + 13 * s, y - 1 * s), (x, y + 13 * s)])
+        pygame.draw.circle(surf, (255, 180, 190), (int(x - 7 * s), int(y - 5 * s)), max(1, int(2 * s)))
+    elif kind == "shield":
+        pts = [(x - 12 * s, y - 12 * s), (x + 12 * s, y - 12 * s), (x + 12 * s, y), (x, y + 14 * s), (x - 12 * s, y)]
+        pygame.draw.polygon(surf, (70, 140, 230), pts)
+        pygame.draw.polygon(surf, (220, 235, 255), pts, max(1, int(2 * s)))
+        pygame.draw.line(surf, (220, 235, 255), (x, y - 10 * s), (x, y + 10 * s), max(1, int(2 * s)))
+    elif kind == "shoes":
+        pygame.draw.rect(surf, (230, 60, 60), (x - 12 * s, y - 2 * s, 24 * s, 10 * s), border_radius=int(4 * s))
+        pygame.draw.rect(surf, (230, 60, 60), (x - 12 * s, y - 12 * s, 10 * s, 12 * s), border_radius=int(3 * s))
+        pygame.draw.rect(surf, WHITE, (x - 12 * s, y + 5 * s, 24 * s, 4 * s))
+        pygame.draw.polygon(surf, (255, 230, 80), [(x - 14 * s, y - 10 * s), (x - 22 * s, y - 14 * s), (x - 20 * s, y - 6 * s)])
+    elif kind == "magnet":
+        pygame.draw.arc(surf, (220, 50, 50), (x - 12 * s, y - 12 * s, 24 * s, 24 * s), 3.14, 6.28, max(2, int(7 * s)))
+        pygame.draw.rect(surf, (220, 50, 50), (x - 12 * s, y - 1 * s, 7 * s, 8 * s))
+        pygame.draw.rect(surf, (220, 50, 50), (x + 5 * s, y - 1 * s, 7 * s, 8 * s))
+        pygame.draw.rect(surf, (230, 230, 230), (x - 12 * s, y + 7 * s, 7 * s, 5 * s))
+        pygame.draw.rect(surf, (230, 230, 230), (x + 5 * s, y + 7 * s, 7 * s, 5 * s))
+
+
+class PowerUp:
+    def __init__(self, x, y, kind):
+        self.x, self.y, self.kind = x, y, kind
+
+    def draw(self, surf, cam, t):
+        x, y = int(self.x - cam[0]), int(self.y - cam[1] + math.sin(t * 4 + self.x) * 4)
+        pygame.draw.circle(surf, (255, 255, 255), (x, y), 22)
+        pygame.draw.circle(surf, (255, 220, 80), (x, y), 22, 3)
+        draw_power_icon(surf, self.kind, x, y)
+
+
+class Particle:
+    def __init__(self, x, y, color, star=False, speed=5):
+        a, s = random.random() * 6.28, random.uniform(1, speed)
+        self.x, self.y = x, y
+        self.vx, self.vy = math.cos(a) * s, math.sin(a) * s
+        self.life = random.uniform(0.4, 0.9)
+        self.color, self.star = color, star
+
+    def update(self, dt):
+        self.x += self.vx
+        self.y += self.vy
+        self.vx *= 0.92
+        self.vy *= 0.92
+        self.life -= dt
+        return self.life > 0
+
+    def draw(self, surf, cam):
+        x, y = int(self.x - cam[0]), int(self.y - cam[1])
+        s = max(1, int(self.life * 8))
+        if self.star:
+            pygame.draw.polygon(surf, self.color, [(x, y - s), (x + s // 3, y), (x, y + s), (x - s // 3, y)])
+            pygame.draw.polygon(surf, self.color, [(x - s, y), (x, y + s // 3), (x + s, y), (x, y - s // 3)])
+        else:
+            pygame.draw.circle(surf, self.color, (x, y), s)
+
+
+class FloatText:
+    def __init__(self, x, y, text, color, size=24):
+        self.x, self.y, self.text, self.color, self.size = x, y, text, color, size
+        self.life = 1.3
+
+    def update(self, dt):
+        self.y -= 0.8
+        self.life -= dt
+        return self.life > 0
+
+
+def draw_trophy(surf, x, y, size=1.0):
+    s = size
+    dark = (200, 140, 20)
+    pygame.draw.rect(surf, GOLD, (x - 9 * s, y - 12 * s, 18 * s, 14 * s), border_radius=int(4 * s))
+    pygame.draw.circle(surf, GOLD, (int(x - 10 * s), int(y - 7 * s)), int(5 * s), max(1, int(2 * s)))
+    pygame.draw.circle(surf, GOLD, (int(x + 10 * s), int(y - 7 * s)), int(5 * s), max(1, int(2 * s)))
+    pygame.draw.rect(surf, dark, (x - 2 * s, y + 2 * s, 4 * s, 6 * s))
+    pygame.draw.rect(surf, GOLD, (x - 7 * s, y + 8 * s, 14 * s, 4 * s))
+    pygame.draw.circle(surf, (255, 250, 200), (int(x - 4 * s), int(y - 8 * s)), max(1, int(2 * s)))
+
+
+def draw_heart(surf, x, y, s, full=True):
+    c = (230, 40, 70) if full else (90, 70, 80)
+    pygame.draw.circle(surf, c, (int(x - 5 * s), int(y - 2 * s)), int(6 * s))
+    pygame.draw.circle(surf, c, (int(x + 5 * s), int(y - 2 * s)), int(6 * s))
+    pygame.draw.polygon(surf, c, [(x - 11 * s, y), (x + 11 * s, y), (x, y + 11 * s)])
+
+
+def draw_lock(surf, x, y, s=1.0):
+    pygame.draw.arc(surf, (230, 230, 230), (x - 12 * s, y - 26 * s, 24 * s, 28 * s), 0, 3.14, max(2, int(5 * s)))
+    pygame.draw.rect(surf, (230, 190, 60), (x - 16 * s, y - 12 * s, 32 * s, 26 * s), border_radius=int(5 * s))
+    pygame.draw.circle(surf, (90, 60, 20), (int(x), int(y)), int(4 * s))
+
+
+class Button:
+    def __init__(self, rect, text, color, action, size=28):
+        self.rect = pygame.Rect(rect)
+        self.text, self.color, self.action, self.size = text, color, action, size
+
+    def draw(self, surf):
+        r = self.rect
+        pygame.draw.rect(surf, (0, 0, 0), r.move(0, 5), border_radius=16)
+        pygame.draw.rect(surf, self.color, r, border_radius=16)
+        pygame.draw.rect(surf, shade(self.color, 1.3), r.inflate(-8, -8), 2, border_radius=13)
+        if self.text:
+            img = font(self.size).render(self.text, True, WHITE)
+            surf.blit(img, (r.centerx - img.get_width() // 2, r.centery - img.get_height() // 2))
+
+
+# ---------------------------------------------------------------- παιχνίδι
+DEFAULT_SAVE = dict(trophies=5, best=5, unlocked=1, cleared=[], weapons=1, weapon=0, album={}, sound=True)
+
+
+class Game:
+    def __init__(self):
+        pygame.mixer.pre_init(22050, -16, 1, 1024)
+        pygame.init()
+        flags = pygame.SCALED | (pygame.FULLSCREEN if ANDROID else 0)
+        try:
+            self.screen = pygame.display.set_mode((W, H), flags)
+        except Exception:
+            self.screen = pygame.display.set_mode((W, H))
+        pygame.display.set_caption("Monster Hunter - Κυνήγι Τεράτων")
+        self.clock = pygame.time.Clock()
+        self.load()
+        self.loading_screen("Φόρτωση...")
+        self.sfx = Sfx(self.save["sound"])
+        self.state = "menu"
+        self.hot = []
+        self.t = 0.0
+        self.touch_seen = ANDROID
+        self.joy_id = self.joy_origin = self.joy_pos = None
+        self.fire_ids = set()
+        self.mouse_fire = False
+        self.album_back = "menu"
+        self.album_cache = None
+        self.banner = None
+        self.ui_particles = []
+        self.world = None
+        self.dark_mask = None
+        self.save_t = 0.0
+        self.clear_info = None
+
+    # ------------------------------------------------------------ αποθήκευση
+    def load(self):
+        self.save = json.loads(json.dumps(DEFAULT_SAVE))
+        try:
+            with open(SAVE_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            for k in DEFAULT_SAVE:
+                if k in data:
+                    self.save[k] = data[k]
+        except Exception:
+            pass
+
+    def save_game(self):
+        try:
+            tmp = SAVE_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.save, f, ensure_ascii=False)
+            os.replace(tmp, SAVE_FILE)
+        except Exception as e:
+            print("Δεν αποθηκεύτηκε:", e)
+
+    @property
+    def trophies(self):
+        return self.save["trophies"]
+
+    def add_trophies(self, n):
+        self.save["trophies"] = max(0, self.save["trophies"] + n)
+        self.save["best"] = max(self.save["best"], self.save["trophies"])
+
+    # ------------------------------------------------------------ κόσμος
+    def loading_screen(self, text):
+        self.screen.fill((30, 40, 80))
+        img = font(40).render(text, True, WHITE)
+        self.screen.blit(img, (W // 2 - img.get_width() // 2, H // 2 - 30))
+        pygame.display.flip()
+        pygame.event.pump()
+
+    def start_world(self, idx):
+        th = WORLDS[idx]
+        self.loading_screen(f"Πάμε στον κόσμο: {th['name']}!")
+        random.seed()
+        self.widx = idx
+        self.world = World(idx)
+        self.player = Human(*HQ, is_player=True)
+        self.dog = Dog(HQ[0] + 40, HQ[1] + 25)
+        self.allies = []
+        for i in range(ALLIES):
+            a = Human(HQ[0] + random.uniform(-50, 50), HQ[1] + random.uniform(-50, 50),
+                      role="escort" if i < ALLY_ESCORTS else "patrol")
+            a.slot = i * 6.283 / ALLY_ESCORTS
+            self.allies.append(a)
+        self.humans = [self.player] + self.allies
+        self.monsters, self.bullets, self.shots = [], [], []
+        self.coins, self.powerups, self.particles, self.texts = [], [], [], []
+        self.lives = LIVES
+        self.progress = 0
+        self.boss, self.boss_spawned, self.boss_dead_t = None, False, 0.0
+        self.dead_timer = self.shake = self.time = 0.0
+        self.power_t = 3.0
+        for _ in range(MONSTERS_ALIVE):
+            self.spawn_monster()
+        for _ in range(POWERUPS_ON_MAP):
+            self.spawn_powerup()
+        self.joy_id = self.joy_pos = None
+        self.fire_ids.clear()
+        self.mouse_fire = False
+        self.state = "play"
+        self.set_banner(f"{th['name']}: βρες {th['goal']} τέρατα!", 3.5)
+
+    def set_banner(self, text, dur=3.0, color=(255, 230, 80)):
+        self.banner = [text, dur, color]
+
+    def alive_humans(self):
+        return [h for h in self.humans if h.alive and not (h.is_player and self.dead_timer > 0)]
+
+    def free_spots(self):
+        return [s for s in self.world.spots if s.occupant is None]
+
+    def spawn_monster(self):
+        spots = [s for s in self.free_spots()
+                 if math.hypot(s.x - self.player.x, s.y - self.player.y) > 600
+                 and all(math.hypot(s.x - h.x, s.y - h.y) > 300 for h in self.humans if h.alive)]
+        if not spots:
+            return
+        pool = WORLDS[self.widx]["pool"]
+        key = random.choices(list(pool), weights=list(pool.values()))[0]
+        self.monsters.append(Monster(random.choice(spots), MT[key]))
+
+    def spawn_powerup(self):
+        for _ in range(10):
+            x, y = self.world.random_street_point()
+            if math.hypot(x - HQ[0], y - HQ[1]) > 200:
+                self.powerups.append(PowerUp(x, y, random.choice(POWER_KINDS)))
+                return
+
+    def spawn_boss(self):
+        key = WORLDS[self.widx]["boss"]
+        far = [s for s in self.world.spots if math.hypot(s.x - self.player.x, s.y - self.player.y) > 750]
+        s = random.choice(far) if far else random.choice(self.world.spots)
+        x, y = s.x, s.y
+        if self.world.blocked(x, y, BOSSES[key]["r"]):
+            x, y = self.world.random_street_point()
+        self.boss = Monster(None, BOSSES[key], x, y)
+        self.monsters.append(self.boss)
+        self.boss_spawned = True
+        self.set_banner(f"Ο ΑΡΧΗΓΟΣ ΗΡΘΕ: {BOSSES[key]['name']}!", 4.0, (255, 90, 90))
+        self.sfx.play("boss")
+        self.shake = 8
+
+    def pick_hideout(self, m, flee):
+        humans = self.alive_humans()
+        near_h = lambda s: min((math.hypot(s.x - h.x, s.y - h.y) for h in humans), default=9999)
+        cands = [s for s in self.free_spots() if near_h(s) > 220]
+        if not cands:
+            return None
+        cands.sort(key=lambda s: math.hypot(s.x - m.x, s.y - m.y))
+        if flee:
+            cands = [s for s in cands if math.hypot(s.x - m.x, s.y - m.y) > 150][:8] or cands[:8]
+            return max(cands, key=near_h)
+        return cands[0]
+
+    def on_screen(self, x, y, margin=80):
+        return abs(x - self.player.x) < W / 2 + margin and abs(y - self.player.y) < H / 2 + margin
+
+    def add_text(self, x, y, text, color, size=24):
+        self.texts.append(FloatText(x, y, text, color, size))
+
+    def poof(self, x, y, color, n=26):
+        for _ in range(n):
+            self.particles.append(Particle(x, y, random.choice([color, WHITE, (255, 230, 90), (255, 150, 200)]),
+                                           star=random.random() < 0.6, speed=6))
+
+    # ------------------------------------------------------------ όπλα / στόχευση
+    def weapon(self):
+        return WEAPONS[min(self.save["weapon"], self.save["weapons"] - 1)]
+
+    def cycle_weapon(self):
+        n = self.save["weapons"]
+        self.save["weapon"] = (self.save["weapon"] + 1) % n
+        if self.state == "play":
+            p = self.player
+            self.add_text(p.x, p.y - 60, self.weapon()["name"], self.weapon()["color"], 22)
+        self.sfx.play("coin")
+
+    def auto_target(self, h, rng=AUTO_AIM_RANGE):
+        best, bd = None, rng
+        for m in self.monsters:
+            if m.state == "hidden":
+                continue
+            cx, cy = m.hit_center()
+            d = math.hypot(cx - h.x, cy - h.y)
+            if d < bd and self.world.los(h.x, h.y - 8, cx, cy, 2):
+                best, bd = m, d
+        return best
+
+    def player_fire(self):
+        p = self.player
+        wpn = self.weapon()
+        p.cool = wpn["cd"]
+        tx, ty = p.gun_tip()
+        for a, o in zip(wpn["angles"], wpn["offs"]):
+            ox, oy = -math.sin(p.dir) * o, math.cos(p.dir) * o
+            self.bullets.append(Bullet(tx + ox, ty + oy, p.dir + a + random.uniform(-0.03, 0.03), "player", wpn))
+        self.sfx.play("laser" if wpn.get("pierce") else "shoot")
+
+    # ------------------------------------------------------------ λογική
+    def update(self, dt):
+        self.time += dt
+        self.shake = max(0, self.shake - dt * 20)
+        if self.banner:
+            self.banner[1] -= dt
+            if self.banner[1] <= 0:
+                self.banner = None
+        self.update_player(dt)
+        self.update_dog(dt)
+        for a in self.allies:
+            self.update_ally(a, dt)
+        for m in self.monsters[:]:
+            self.update_monster(m, dt)
+        self.update_bullets(dt)
+        self.update_shots(dt)
+        self.update_items(dt)
+        self.particles = [o for o in self.particles if o.update(dt)]
+        self.texts = [t for t in self.texts if t.update(dt)]
+        if not self.boss_spawned and self.progress >= WORLDS[self.widx]["goal"]:
+            self.spawn_boss()
+        if self.boss_dead_t > 0:
+            self.boss_dead_t -= dt
+            if self.boss_dead_t <= 0:
+                self.world_cleared()
+        self.save_t += dt
+        if self.save_t > 8:
+            self.save_t = 0
+            self.save_game()
+
+    def move_input(self):
+        keys = pygame.key.get_pressed()
+        dx = (keys[pygame.K_d] or keys[pygame.K_RIGHT]) - (keys[pygame.K_a] or keys[pygame.K_LEFT])
+        dy = (keys[pygame.K_s] or keys[pygame.K_DOWN]) - (keys[pygame.K_w] or keys[pygame.K_UP])
+        if dx or dy:
+            l = math.hypot(dx, dy)
+            return dx / l, dy / l
+        if self.joy_id is not None and self.joy_pos:
+            jx, jy = self.joy_pos[0] - self.joy_origin[0], self.joy_pos[1] - self.joy_origin[1]
+            l = math.hypot(jx, jy)
+            if l > 10:
+                k = min(1.0, l / 70) / l
+                return jx * k, jy * k
+        return 0, 0
+
+    def update_player(self, dt):
+        p = self.player
+        for attr in ("shield_t", "speed_t", "magnet_t"):
+            setattr(p, attr, max(0, getattr(p, attr) - dt))
+        if self.dead_timer > 0:
+            self.dead_timer -= dt
+            if self.dead_timer <= 0:
+                p.x, p.y = HQ
+                p.hp, p.invuln = PLAYER_MAX_HP, 2.5
+                self.dog.x, self.dog.y = HQ[0] + 40, HQ[1] + 25
+            return
+        mx, my = self.move_input()
+        p.moving = bool(mx or my)
+        sp = PLAYER_SPEED * (1.6 if p.speed_t > 0 else 1)
+        if p.moving:
+            p.walk += dt * 12 * (1.4 if p.speed_t > 0 else 1)
+            nx, ny = p.x + mx * sp, p.y + my * sp
+            if not self.world.blocked(nx, p.y, p.r):
+                p.x = nx
+            if not self.world.blocked(p.x, ny, p.r):
+                p.y = ny
+            p.dir = math.atan2(my, mx)
+        p.cool = max(0, p.cool - dt)
+        p.invuln = max(0, p.invuln - dt)
+        keys = pygame.key.get_pressed()
+        wants_fire = keys[pygame.K_SPACE] or bool(self.fire_ids) or self.mouse_fire
+        if self.mouse_fire:
+            cam = self.camera(False)
+            mx2, my2 = pygame.mouse.get_pos()
+            p.dir = math.atan2(my2 + cam[1] - (p.y - 8), mx2 + cam[0] - p.x)
+        elif wants_fire:
+            tgt = self.auto_target(p)
+            if tgt:
+                cx, cy = tgt.hit_center()
+                p.dir = math.atan2(cy - (p.y - 8), cx - p.x)
+        if wants_fire and p.cool <= 0:
+            self.player_fire()
+        if not any(m.state == "chase" and dist(m, p) < 300 for m in self.monsters):
+            p.hp = min(PLAYER_MAX_HP, p.hp + 6 * dt)
+
+    def update_dog(self, dt):
+        d, p, world = self.dog, self.player, self.world
+        d.barking = max(0, d.barking - dt)
+        d.moving = False
+        if dist(d, p) > 900:
+            d.x, d.y, d.path = p.x + 30, p.y + 20, None
+        if d.target and (d.target.occupant is None or d.target.occupant.state != "hidden"
+                         or math.hypot(d.target.x - p.x, d.target.y - p.y) > 520):
+            d.target = None
+        if d.target is None and self.dead_timer <= 0:
+            best, bd = None, 400
+            for m in self.monsters:
+                if m.state == "hidden" and m.spot:
+                    dd = math.hypot(m.x - p.x, m.y - p.y)
+                    if dd < bd:
+                        best, bd = m.spot, dd
+            if best:
+                d.target, d.bark_t = best, 0.2
+        if d.target:
+            s = d.target
+            l = math.hypot(s.x - p.x, s.y - p.y) or 1
+            tx, ty = s.x - (s.x - p.x) / l * 38, s.y - (s.y - p.y) / l * 38
+            if math.hypot(tx - d.x, ty - d.y) > 14:
+                d.moving = d.steer(world, tx, ty, DOG_SPEED, dt)
+            else:
+                d.dir = math.atan2(s.y - d.y, s.x - d.x)
+                d.bark_t -= dt
+                if d.bark_t <= 0:
+                    d.barking, d.bark_t = 0.35, 1.3
+                    self.add_text(d.x, d.y - 40, "ΓΑΒ! ΓΑΒ!", (255, 255, 255), 22)
+                    self.sfx.play("bark")
+        else:
+            back = p.dir + math.pi
+            tx, ty = p.x + math.cos(back) * 40, p.y + math.sin(back) * 30 + 10
+            if world.blocked(tx, ty, d.r):
+                tx, ty = p.x, p.y
+            dd = math.hypot(tx - d.x, ty - d.y)
+            if dd > 30:
+                d.moving = d.steer(world, tx, ty, DOG_SPEED * (1.3 if dd > 200 else 1), dt)
+        if d.moving:
+            d.walk += dt * 14
+
+    def update_ally(self, a, dt):
+        world = self.world
+        if not a.alive:
+            a.respawn -= dt
+            if a.respawn <= 0:
+                a.alive, a.hp, a.invuln = True, a.maxhp, 2.0
+                a.x, a.y = HQ[0] + random.uniform(-40, 40), HQ[1] + random.uniform(-40, 40)
+                a.path = None
+            return
+        a.cool = max(0, a.cool - dt)
+        a.invuln = max(0, a.invuln - dt)
+        a.moving = False
+        target, bd = None, 480
+        for m in self.monsters:
+            if m.state != "hidden":
+                d = dist(a, m)
+                if d < bd:
+                    target, bd = m, d
+        if target:
+            want = 220 + (target.r if target.boss else 0)
+            if bd > want:
+                a.moving = a.steer(world, target.x, target.y, ALLY_SPEED, dt)
+            elif bd < 110 + (target.r if target.boss else 0):
+                a.moving = a.steer(world, a.x - (target.x - a.x), a.y - (target.y - a.y), ALLY_SPEED, dt)
+            cx, cy = target.hit_center()
+            a.dir = math.atan2(cy - (a.y - 8), cx - a.x)
+            if a.cool <= 0 and world.los(a.x, a.y - 8, cx, cy, 2):
+                a.cool = 0.4 + random.random() * 0.3
+                tx, ty = a.gun_tip()
+                self.bullets.append(Bullet(tx, ty, a.dir + random.uniform(-0.09, 0.09), "ally", WEAPONS[0]))
+                if self.on_screen(a.x, a.y):
+                    self.sfx.play("ally_shoot", gap=0.08)
+        elif a.role == "escort" and self.dead_timer <= 0:
+            p = self.player
+            tx, ty = p.x + math.cos(a.slot) * 110, p.y + math.sin(a.slot) * 110
+            if world.blocked(tx, ty, a.r):
+                tx, ty = p.x, p.y
+            d = math.hypot(tx - a.x, ty - a.y)
+            if d > 35:
+                a.moving = a.steer(world, tx, ty, ALLY_SPEED * (1.3 if d > 250 else 1), dt)
+        else:
+            a.goal_t -= dt
+            if a.goal is None or a.goal_t <= 0 or math.hypot(a.goal[0] - a.x, a.goal[1] - a.y) < 30:
+                a.goal, a.goal_t = world.random_street_point(), 14
+            a.moving = a.steer(world, a.goal[0], a.goal[1], ALLY_SPEED * 0.8, dt)
+        if a.moving:
+            a.walk += dt * 12
+        if not any(m.state == "chase" and dist(m, a) < 300 for m in self.monsters):
+            a.hp = min(a.maxhp, a.hp + 4 * dt)
+
+    def update_monster(self, m, dt):
+        world = self.world
+        m.wobble += dt * 6
+        m.flash = max(0, m.flash - dt)
+        m.slow_t = max(0, m.slow_t - dt)
+        humans = self.alive_humans()
+        if m.state == "hidden":
+            for h in humans:
+                if dist(m, h) < REVEAL_RADIUS:
+                    m.state, m.lost = "chase", 0
+                    m.spot.occupant, m.spot = None, None
+                    if self.on_screen(m.x, m.y, 200):
+                        self.sfx.play("growl", gap=0.3)
+                        self.add_text(m.x, m.y - 50, "!", (255, 60, 60), 34)
+                    break
+            return
+        speed = m.t["speed"] * (0.4 if m.slow_t > 0 else 1)
+        if m.state == "chase":
+            if not m.fled and m.t["hp"] >= 2 and m.hp <= m.t["hp"] / 2:
+                spot = self.pick_hideout(m, flee=True)
+                if spot:
+                    m.state, m.spot, m.fled = "flee", spot, True
+                    spot.occupant = m
+                    m.path = None
+                    if self.on_screen(m.x, m.y):
+                        self.sfx.play("flee")
+                        self.add_text(m.x, m.y - 55, "Τρέχει να κρυφτεί!", WHITE, 20)
+                    return
+            target = min(humans, key=lambda h: dist(m, h), default=None)
+            if m.boss and target is None:
+                target = self.player
+            d = dist(m, target) if target else 9999
+            if d > 650 and not m.boss:
+                m.lost += dt
+                if m.lost > 3:
+                    spot = self.pick_hideout(m, flee=False)
+                    if spot:
+                        m.state, m.spot = "return", spot
+                        spot.occupant = m
+                        m.path = None
+                return
+            m.lost = 0
+            if d > m.r + target.r - 4:
+                m.steer(world, target.x, target.y, speed, dt)
+            m.face = 1 if target.x >= m.x else -1
+            # βολές
+            if m.t.get("shoot") and d < 560:
+                m.shoot_t -= dt
+                if m.shoot_t <= 0:
+                    cx, cy = m.hit_center()
+                    if m.fly or world.los(cx, cy, target.x, target.y - 8, 4):
+                        m.shoot_t = m.t["shoot"] + random.uniform(0, 0.8)
+                        ang = math.atan2(target.y - 8 - cy, target.x - cx)
+                        if m.boss:
+                            for da in (-0.25, 0, 0.25):
+                                self.shots.append(Shot(cx, cy, ang + da, 5.2, 16, m.t["shot_col"], ghost=m.fly))
+                        else:
+                            self.shots.append(Shot(cx, cy, ang, 5.5, 12, (255, 140, 40)))
+                        if self.on_screen(m.x, m.y):
+                            self.sfx.play("fire")
+            if m.boss and m.t.get("summon"):
+                m.summon_t -= dt
+                if m.summon_t <= 0 and len(self.monsters) < 28:
+                    m.summon_t = 7.0
+                    for k in (-1, 1):
+                        x, y = m.x + k * 60, m.y + 30
+                        if not world.blocked(x, y, 20) or MT[m.t["summon"]].get("fly"):
+                            self.monsters.append(Monster(None, MT[m.t["summon"]], x, y))
+                            self.poof(x, y, (200, 200, 255), 10)
+            for h in humans:
+                if not h.protected() and dist(m, h) < m.r + h.r + 2:
+                    h.hp -= m.t["dmg"] * dt
+                    if h.is_player:
+                        self.shake = 4
+                        self.sfx.play("hurt", gap=0.35)
+                    if h.hp <= 0:
+                        self.human_died(h, m)
+        else:
+            sp = speed * (1.45 if m.state == "flee" else 1.0)
+            m.steer(world, m.spot.x, m.spot.y, sp, dt)
+            m.face = 1 if math.cos(m.dir) >= 0 else -1
+            if math.hypot(m.spot.x - m.x, m.spot.y - m.y) < 12:
+                if m.state == "flee":
+                    m.hp = m.t["hp"]
+                m.state, m.path = "hidden", None
+                m.x, m.y = m.spot.x, m.spot.y
+
+    def update_bullets(self, dt):
+        world = self.world
+        alive = []
+        for b in self.bullets:
+            if not b.update(dt) or world.blocked(b.x, b.y, 0):
+                continue
+            used = False
+            for m in self.monsters:
+                if m.state == "hidden" or id(m) in b.hit:
+                    continue
+                cx, cy = m.hit_center()
+                if math.hypot(cx - b.x, cy - b.y) < m.r + 6:
+                    b.hit.add(id(m))
+                    m.hp -= b.dmg
+                    m.flash = 0.1
+                    if b.freeze:
+                        m.slow_t = 2.0
+                    if self.on_screen(m.x, m.y):
+                        self.sfx.play("hit")
+                    if m.hp <= 0:
+                        self.kill_monster(m, b.owner)
+                    if not b.pierce:
+                        used = True
+                        break
+            if not used:
+                alive.append(b)
+        self.bullets = alive
+
+    def update_shots(self, dt):
+        alive = []
+        for s in self.shots:
+            if not s.update(dt) or (not s.ghost and self.world.blocked(s.x, s.y, 0)):
+                continue
+            hit = False
+            for h in self.alive_humans():
+                if math.hypot(h.x - s.x, h.y - 8 - s.y) < h.r + 8:
+                    hit = True
+                    if not h.protected():
+                        h.hp -= s.dmg
+                        if h.is_player:
+                            self.shake = 5
+                            self.sfx.play("hurt", gap=0.2)
+                        if h.hp <= 0:
+                            self.human_died(h, self.boss or None)
+                    break
+            if not hit:
+                alive.append(s)
+        self.shots = alive
+
+    def update_items(self, dt):
+        p = self.player
+        alive_p = self.dead_timer <= 0
+        rad = 520 if p.magnet_t > 0 else 110
+        keep = []
+        for c in self.coins:
+            c.t += dt
+            c.x += c.vx
+            c.y += c.vy
+            c.vx *= 0.9
+            c.vy *= 0.9
+            d = math.hypot(p.x - c.x, p.y - 8 - c.y)
+            if alive_p and c.t > c.delay and (d < rad or c.delay > 0):
+                sp = 9 + c.t * 3
+                c.x += (p.x - c.x) / (d or 1) * min(sp, d)
+                c.y += (p.y - 8 - c.y) / (d or 1) * min(sp, d)
+            if alive_p and d < 30:
+                self.add_trophies(1)
+                self.sfx.play("coin", gap=0.03)
+                for _ in range(4):
+                    self.particles.append(Particle(p.x, p.y - 20, GOLD, star=True, speed=3))
+                continue
+            keep.append(c)
+        self.coins = keep
+        keep = []
+        for u in self.powerups:
+            if alive_p and math.hypot(p.x - u.x, p.y - u.y) < 36:
+                self.apply_power(u.kind)
+                continue
+            keep.append(u)
+        self.powerups = keep
+        self.power_t -= dt
+        if self.power_t <= 0:
+            self.power_t = 8.0
+            if len(self.powerups) < POWERUPS_ON_MAP:
+                self.spawn_powerup()
+
+    def apply_power(self, kind):
+        p = self.player
+        if kind == "heart":
+            p.hp = PLAYER_MAX_HP
+            if self.lives < LIVES:
+                self.lives += 1
+        elif kind == "shield":
+            p.shield_t = 8.0
+        elif kind == "shoes":
+            p.speed_t = 8.0
+        elif kind == "magnet":
+            p.magnet_t = 12.0
+        self.add_text(p.x, p.y - 60, POWER_NAMES[kind], (120, 255, 200), 26)
+        self.sfx.play("powerup")
+        for _ in range(16):
+            self.particles.append(Particle(p.x, p.y - 10, (120, 255, 200), star=True))
+
+    def discover(self, key):
+        alb = self.save["album"]
+        first = key not in alb
+        alb[key] = alb.get(key, 0) + 1
+        if first:
+            self.album_cache = None
+            self.set_banner(f"ΝΕΟ ΤΕΡΑΣ ΣΤΟ ΑΛΜΠΟΥΜ: {ALL_TYPES[key]['name']}!", 3.0, (150, 230, 255))
+            self.sfx.play("album")
+
+    def kill_monster(self, m, owner):
+        if m not in self.monsters:
+            return
+        self.monsters.remove(m)
+        if m.spot:
+            m.spot.occupant = None
+        self.discover(m.t["key"])
+        cx, cy = m.hit_center()
+        if m.boss:
+            self.poof(cx, cy, m.t["color"], 90)
+            self.shake = 12
+            self.sfx.play("poof")
+            self.sfx.play("fanfare")
+            for i in range(BOSS_REWARD):
+                self.coins.append(Coin(cx, cy, delay=0.8 + i * 0.03))
+            self.boss = None
+            self.boss_dead_t = 4.0
+            self.set_banner("ΜΠΡΑΒΟ! ΝΙΚΗΣΕΣ ΤΟΝ ΑΡΧΗΓΟ!", 4.0, (255, 230, 80))
+            for mm in self.monsters[:]:   # τα υπόλοιπα τέρατα τρέχουν να κρυφτούν
+                if mm.state == "chase":
+                    spot = self.pick_hideout(mm, False)
+                    if spot:
+                        mm.state, mm.spot = "return", spot
+                        spot.occupant = mm
+            return
+        self.progress += 1
+        self.poof(cx, cy, m.t["color"])
+        if owner == "player":
+            for _ in range(m.t["reward"]):
+                self.coins.append(Coin(cx, cy))
+            self.sfx.play("poof")
+        else:
+            self.add_trophies(ALLY_KILL_BONUS)
+            if self.on_screen(m.x, m.y):
+                self.add_text(m.x, m.y - 40, f"+{ALLY_KILL_BONUS} ομάδα", (255, 200, 120), 18)
+                self.sfx.play("poof")
+            self.sfx.play("team")
+        if random.random() < 0.22:
+            self.powerups.append(PowerUp(m.x, m.y, random.choice(POWER_KINDS)))
+        if not self.boss_spawned or len(self.monsters) < MONSTERS_ALIVE // 2:
+            self.spawn_monster()
+
+    def human_died(self, h, killer):
+        if not h.alive or (h.is_player and self.dead_timer > 0):
+            return
+        self.poof(h.x, h.y - 10, (200, 200, 200), 30)
+        if killer and not killer.boss and killer in self.monsters:
+            spot = self.pick_hideout(killer, flee=False)
+            if spot:
+                killer.state, killer.spot = "return", spot
+                spot.occupant = killer
+        if h.is_player:
+            self.lives -= 1
+            self.add_trophies(-1)
+            self.shake = 10
+            self.add_text(h.x, h.y - 50, "-1 κύπελλο", (255, 120, 120), 28)
+            self.sfx.play("player_die")
+            self.fire_ids.clear()
+            if self.lives <= 0:
+                self.save["trophies"] = (self.save["trophies"] + 1) // 2
+                self.state = "retry"
+                self.sfx.play("retry")
+                self.save_game()
+            else:
+                self.dead_timer = 2.0
+                h.hp = 1
+        else:
+            h.alive, h.respawn = False, ALLY_RESPAWN
+            if self.on_screen(h.x, h.y):
+                self.add_text(h.x, h.y - 50, f"{h.name}: Γυρίζω αμέσως!", (255, 200, 200), 18)
+                self.sfx.play("ally_die")
+
+    def world_cleared(self):
+        idx = self.widx
+        s = self.save
+        key = WORLDS[idx]["key"]
+        if key not in s["cleared"]:
+            s["cleared"].append(key)
+        new_weapon = None
+        if s["weapons"] < len(WEAPONS) and idx + 2 > s["weapons"]:
+            s["weapons"] = min(len(WEAPONS), idx + 2)
+            s["weapon"] = s["weapons"] - 1
+            new_weapon = WEAPONS[s["weapon"]]
+        next_world = None
+        if idx + 1 < len(WORLDS):
+            if s["unlocked"] < idx + 2:
+                s["unlocked"] = idx + 2
+            next_world = WORLDS[idx + 1]
+        self.clear_info = dict(boss=BOSSES[WORLDS[idx]["boss"]], weapon=new_weapon, next=next_world,
+                               final=idx == len(WORLDS) - 1)
+        self.state = "clear"
+        self.banner = None
+        self.ui_particles = []
+        self.sfx.play("fanfare")
+        self.save_game()
+
+    def camera(self, shake=True):
+        p = self.player
+        cx = min(max(p.x - W / 2, 0), WORLD_W - W)
+        cy = min(max(p.y - H / 2, 0), WORLD_H - H)
+        if shake and self.shake > 0:
+            cx += random.uniform(-self.shake, self.shake)
+            cy += random.uniform(-self.shake, self.shake)
+        return cx, cy
+
+    # ------------------------------------------------------------ σχέδιο: παιχνίδι
+    def text(self, txt, size, color, x, y, center=True, shadow_px=3):
+        img = font(size).render(txt, True, color)
+        if center:
+            x -= img.get_width() // 2
+        if shadow_px:
+            self.screen.blit(font(size).render(txt, True, (0, 0, 0)), (x + shadow_px, y + shadow_px))
+        self.screen.blit(img, (x, y))
+        return img.get_width()
+
+    def button(self, rect, txt, color, action, size=28):
+        b = Button(rect, txt, color, action, size)
+        b.draw(self.screen)
+        self.hot.append((b.rect, action))
+        return b
+
+    def draw_play(self):
+        s = self.screen
+        t = self.t
+        cam = self.camera()
+        s.fill((0, 0, 0))
+        s.blit(self.world.bg, (0, 0), pygame.Rect(int(cam[0]), int(cam[1]), W, H))
+        vis = lambda x, y, m=80: -m < x - cam[0] < W + m and -m < y - cam[1] < H + m
+
+        # το σκυλάκι δείχνει κρυψώνα
+        d = self.dog
+        if d.target:
+            sx, sy = int(d.target.x - cam[0]), int(d.target.y - cam[1])
+            rr = 30 + int(math.sin(t * 8) * 5)
+            pygame.draw.circle(s, (255, 230, 60), (sx, sy), rr, 4)
+            bob = int(math.sin(t * 6) * 5)
+            pygame.draw.polygon(s, (255, 230, 60), [(sx - 12, sy - 58 + bob), (sx + 12, sy - 58 + bob), (sx, sy - 42 + bob)])
+        for m in self.monsters:
+            if m.state == "hidden" and vis(m.x, m.y) and int(m.wobble) % 3 != 0 and \
+                    (dist(m, self.player) < 380 or (d.target is m.spot)):
+                ex, ey = m.spot.eyes_pos()
+                ex, ey = int(ex - cam[0]), int(ey - cam[1])
+                for k in (-5, 5):
+                    pygame.draw.circle(s, (255, 255, 0), (ex + k, ey), 3)
+                    pygame.draw.circle(s, (200, 0, 0), (ex + k, ey), 1)
+        for c in self.coins:
+            if vis(c.x, c.y):
+                c.draw(s, cam, t)
+        for u in self.powerups:
+            if vis(u.x, u.y):
+                u.draw(s, cam, t)
+        actors = [m for m in self.monsters if m.state != "hidden" and vis(m.x, m.y, 200)]
+        actors += [a for a in self.allies if a.alive and vis(a.x, a.y)]
+        if self.dead_timer <= 0:
+            actors.append(self.player)
+        actors.append(self.dog)
+        for a in sorted(actors, key=lambda a: a.y):
+            a.draw(s, cam, t)
+        for b in self.bullets:
+            b.draw(s, cam)
+        for sh in self.shots:
+            sh.draw(s, cam, t)
+        tk = self.world.th["tree"]
+        for x, y, r in self.world.trees:
+            if vis(x, y):
+                draw_tree(s, tk, int(x - cam[0]), int(y - cam[1]), r)
+        for pa in self.particles:
+            pa.draw(s, cam)
+        if self.world.th.get("dark"):
+            if self.dark_mask is None:
+                self.dark_mask = pygame.Surface((W * 2, H * 2), pygame.SRCALPHA)
+                self.dark_mask.fill((15, 0, 30, 170))
+                for r in range(380, 0, -8):
+                    a = int(170 * min(1, (r / 380) ** 2))
+                    pygame.draw.circle(self.dark_mask, (15, 0, 30, a), (W, H), r)
+            px, py = self.player.x - cam[0], self.player.y - cam[1]
+            s.blit(self.dark_mask, (int(px - W), int(py - H)))
+        for tx in self.texts:
+            img = font(tx.size).render(tx.text, True, tx.color)
+            img.set_alpha(int(255 * min(1, tx.life)))
+            s.blit(img, (tx.x - cam[0] - img.get_width() / 2, tx.y - cam[1]))
+        self.draw_hud(cam)
+        if self.dead_timer > 0:
+            self.text("Ωχ! Ξαναπάμε!", 50, (255, 120, 120), W // 2, H // 2 - 40)
+
+    def draw_hud(self, cam):
+        s = self.screen
+        p = self.player
+        panel = pygame.Surface((300, 118), pygame.SRCALPHA)
+        panel.fill((0, 0, 0, 140))
+        s.blit(panel, (10, 10))
+        draw_trophy(s, 40, 44, 1.6)
+        self.text(str(self.trophies), 40, GOLD, 68, 18, center=False, shadow_px=2)
+        for i in range(LIVES):
+            draw_heart(s, 205 + i * 32, 36, 1.2, i < self.lives)
+        hp = max(0, p.hp) / PLAYER_MAX_HP
+        pygame.draw.rect(s, (60, 0, 0), (22, 76, 276, 16), border_radius=6)
+        col = (60, 210, 80) if hp > 0.5 else (240, 190, 40) if hp > 0.25 else (230, 50, 50)
+        pygame.draw.rect(s, col, (22, 76, int(276 * hp), 16), border_radius=6)
+        x = 26
+        for attr, kind in (("shield_t", "shield"), ("speed_t", "shoes"), ("magnet_t", "magnet")):
+            v = getattr(p, attr)
+            if v > 0:
+                draw_power_icon(s, kind, x + 10, 108, 0.7)
+                self.text(str(int(v) + 1), 16, WHITE, x + 24, 100, center=False, shadow_px=1)
+                x += 52
+
+        # πρόοδος / αρχηγός
+        th = WORLDS[self.widx]
+        if self.boss:
+            b = self.boss
+            self.text(b.t["name"], 24, (255, 120, 120), W // 2, 12)
+            pygame.draw.rect(s, (50, 0, 0), (W // 2 - 200, 44, 400, 20), border_radius=8)
+            pygame.draw.rect(s, (230, 50, 60), (W // 2 - 200, 44, int(400 * max(0, b.hp) / b.t["hp"]), 20),
+                             border_radius=8)
+            pygame.draw.rect(s, WHITE, (W // 2 - 200, 44, 400, 20), 2, border_radius=8)
+        elif not self.boss_spawned:
+            goal = th["goal"]
+            self.text(f"{th['name']}   Τέρατα: {min(self.progress, goal)} / {goal}", 22, WHITE, W // 2, 12)
+            pygame.draw.rect(s, (30, 30, 50), (W // 2 - 160, 42, 320, 14), border_radius=6)
+            pygame.draw.rect(s, (120, 200, 255), (W // 2 - 160, 42, int(320 * min(1, self.progress / goal)), 14),
+                             border_radius=6)
+        # μικρός χάρτης
+        mm = self.world.minimap.copy()
+        k = mm.get_width() / WORLD_W
+        for m in self.monsters:
+            if m.state != "hidden":
+                pygame.draw.circle(mm, (255, 60, 60), (int(m.x * k), int(m.y * k)), 6 if m.boss else 3)
+        for a in self.allies:
+            if a.alive:
+                pygame.draw.circle(mm, (90, 255, 90), (int(a.x * k), int(a.y * k)), 2)
+        for u in self.powerups:
+            pygame.draw.circle(mm, (255, 255, 255), (int(u.x * k), int(u.y * k)), 2)
+        pygame.draw.circle(mm, WHITE, (int(p.x * k), int(p.y * k)), 5)
+        pygame.draw.circle(mm, (60, 140, 255), (int(p.x * k), int(p.y * k)), 4)
+        pygame.draw.rect(mm, WHITE, mm.get_rect(), 2)
+        mx = W - mm.get_width() - 10
+        s.blit(mm, (mx, 10))
+        # παύση
+        pr = pygame.Rect(mx - 66, 10, 56, 56)
+        pygame.draw.rect(s, (0, 0, 0), pr.move(0, 3), border_radius=12)
+        pygame.draw.rect(s, (70, 80, 120), pr, border_radius=12)
+        pygame.draw.rect(s, WHITE, (pr.x + 17, pr.y + 15, 8, 26))
+        pygame.draw.rect(s, WHITE, (pr.x + 31, pr.y + 15, 8, 26))
+        self.hot.append((pr, self.pause))
+        # βέλος προς τον αρχηγό
+        if self.boss and not self.on_screen(self.boss.x, self.boss.y, -40):
+            ang = math.atan2(self.boss.y - p.y, self.boss.x - p.x)
+            cx, cy = W / 2 + math.cos(ang) * (W / 2 - 90), H / 2 + math.sin(ang) * (H / 2 - 90)
+            pts = [(cx + math.cos(ang) * 30, cy + math.sin(ang) * 30),
+                   (cx + math.cos(ang + 2.5) * 22, cy + math.sin(ang + 2.5) * 22),
+                   (cx + math.cos(ang - 2.5) * 22, cy + math.sin(ang - 2.5) * 22)]
+            pygame.draw.polygon(s, (255, 60, 60), pts)
+            pygame.draw.polygon(s, WHITE, pts, 3)
+            draw_crown(s, cx - math.cos(ang) * 10, cy - math.sin(ang) * 10 + 8, 12)
+        # όπλο
+        wpn = self.weapon()
+        wc = (W - 245, H - 80)
+        pygame.draw.circle(s, (0, 0, 0), (wc[0], wc[1] + 4), 46)
+        pygame.draw.circle(s, (60, 70, 110), wc, 46)
+        pygame.draw.circle(s, wpn["color"], wc, 46, 4)
+        pygame.draw.rect(s, (40, 40, 40), (wc[0] - 22, wc[1] - 14, 40, 12), border_radius=3)
+        pygame.draw.rect(s, (40, 40, 40), (wc[0] - 20, wc[1] - 6, 10, 16), border_radius=3)
+        pygame.draw.circle(s, wpn["color"], (wc[0] + 22, wc[1] - 8), 6)
+        self.text(wpn["name"], 15, WHITE, wc[0], wc[1] + 14, shadow_px=1)
+        if self.save["weapons"] > 1:
+            self.hot.append((pygame.Rect(wc[0] - 46, wc[1] - 46, 92, 92), self.cycle_weapon))
+        # χειριστήρια αφής
+        if self.touch_seen:
+            fc = (W - 110, H - 120)
+            pressed = bool(self.fire_ids)
+            pygame.draw.circle(s, (0, 0, 0), (fc[0], fc[1] + 5), 72)
+            pygame.draw.circle(s, (240, 70, 70) if not pressed else (255, 130, 130), fc, 72)
+            pygame.draw.circle(s, (255, 180, 180), fc, 72, 4)
+            self.text("ΦΩΤΙΑ", 26, WHITE, fc[0], fc[1] - 16, shadow_px=2)
+            if self.joy_id is not None and self.joy_pos:
+                o, jp = self.joy_origin, self.joy_pos
+                dx, dy = jp[0] - o[0], jp[1] - o[1]
+                l = math.hypot(dx, dy)
+                if l > 70:
+                    dx, dy = dx / l * 70, dy / l * 70
+                base, knob = o, (o[0] + dx, o[1] + dy)
+            else:
+                base = knob = (150, H - 150)
+            js = pygame.Surface((200, 200), pygame.SRCALPHA)
+            pygame.draw.circle(js, (255, 255, 255, 60), (100, 100), 90)
+            pygame.draw.circle(js, (255, 255, 255, 140), (100, 100), 90, 4)
+            s.blit(js, (base[0] - 100, base[1] - 100))
+            pygame.draw.circle(s, (230, 230, 240), (int(knob[0]), int(knob[1])), 38)
+            pygame.draw.circle(s, (150, 150, 170), (int(knob[0]), int(knob[1])), 38, 4)
+        else:
+            self.text("WASD: κίνηση · ποντίκι/SPACE: φωτιά · Q: όπλο · P: παύση · M: ήχος", 18, WHITE, W // 2, H - 30, shadow_px=2)
+        if self.banner:
+            txt, dur, col = self.banner
+            img = font(34).render(txt, True, col)
+            bw = img.get_width() + 40
+            bgp = pygame.Surface((bw, 60), pygame.SRCALPHA)
+            bgp.fill((0, 0, 0, 160))
+            s.blit(bgp, (W // 2 - bw // 2, 80))
+            self.text(txt, 34, col, W // 2, 88)
+
+    # ------------------------------------------------------------ οθόνες
+    def draw_menu(self):
+        s, t = self.screen, self.t
+        s.fill((34, 46, 92))
+        for i in range(12):
+            y = (i * 70 + t * 20) % (H + 70) - 70
+            pygame.draw.circle(s, (44, 58, 110), (int(80 + i * 97) % W, int(y)), 40)
+        deco = [("slime", 120, 230), ("ghost", 1000, 220), ("dragon", 110, 640), ("bat", 1010, 640)]
+        for k, x, y in deco:
+            draw_monster_type(s, x, y + int(math.sin(t * 2 + x) * 6), MT[k], 1 if x < W / 2 else -1, t * 4, scale=1.5)
+        self.text("MONSTER HUNTER", 72, GOLD, W // 2, 30, shadow_px=5)
+        self.text("Κυνήγι Τεράτων", 32, WHITE, W // 2, 118)
+        draw_trophy(s, W - 150, 42, 1.6)
+        self.text(str(self.trophies), 40, GOLD, W - 125, 18, center=False)
+        cw, ch, gap = 186, 220, 16
+        x0 = (W - (cw * 5 + gap * 4)) // 2
+        for i, th in enumerate(WORLDS):
+            r = pygame.Rect(x0 + i * (cw + gap), 190, cw, ch)
+            unlocked = i < self.save["unlocked"]
+            pygame.draw.rect(s, (0, 0, 0), r.move(0, 6), border_radius=18)
+            pygame.draw.rect(s, th["ground"], r, border_radius=18)
+            pygame.draw.rect(s, th["road"], (r.x, r.y + 140, r.w, 80), border_bottom_left_radius=18,
+                             border_bottom_right_radius=18)
+            boss = BOSSES[th["boss"]]
+            draw_monster_type(s, r.centerx, r.y + 118 + int(math.sin(t * 2 + i) * 4), boss, 1, t * 3,
+                              flash=False, scale=1.15)
+            pygame.draw.rect(s, WHITE, r, 3, border_radius=18)
+            self.text(th["name"], 24, WHITE, r.centerx, r.y + 160)
+            if not unlocked:
+                ov = pygame.Surface((r.w, r.h), pygame.SRCALPHA)
+                ov.fill((10, 10, 20, 190))
+                s.blit(ov, r.topleft)
+                draw_lock(s, r.centerx, r.centery, 1.6)
+            else:
+                if th["key"] in self.save["cleared"]:
+                    cx, cy = r.right - 26, r.y + 26
+                    pts = [(cx + math.cos(a) * (16 if j % 2 == 0 else 7), cy + math.sin(a) * (16 if j % 2 == 0 else 7))
+                           for j, a in enumerate([-math.pi / 2 + j * math.pi / 5 for j in range(10)])]
+                    pygame.draw.polygon(s, GOLD, pts)
+                    pygame.draw.polygon(s, (150, 100, 10), pts, 2)
+                self.hot.append((r, lambda i=i: self.start_world(i)))
+        self.text("Διάλεξε κόσμο!", 30, WHITE, W // 2, 430)
+        n_alb = len([k for k in ALBUM_ORDER if k in self.save["album"]])
+        self.button((W // 2 - 330, 500, 300, 80), f"Άλμπουμ  {n_alb}/{len(ALBUM_ORDER)}", (150, 80, 190),
+                    lambda: self.open_album("menu"), 30)
+        self.button((W // 2 + 30, 500, 300, 80), "Ήχος: " + ("ON" if self.sfx.on else "OFF"),
+                    (70, 140, 90) if self.sfx.on else (110, 110, 110), self.toggle_sound, 30)
+        self.text(f"Όπλα: {self.save['weapons']}/{len(WEAPONS)}   ·   Ρεκόρ κυπέλλων: {self.save['best']}", 20,
+                  (200, 210, 240), W // 2, 610, shadow_px=1)
+
+    def open_album(self, back):
+        self.album_back = back
+        self.state = "album"
+
+    def build_album_cache(self):
+        cache = {}
+        for key in ALBUM_ORDER:
+            t = ALL_TYPES[key]
+            boss = t["boss"]
+            size = (180, 160) if boss else (125, 110)
+            img = pygame.Surface(size, pygame.SRCALPHA)
+            sc = 1.75 if boss else 1.35
+            draw_monster_type(img, size[0] // 2, size[1] - 22, t, 1, 1.0, scale=sc)
+            sil = img.copy()
+            sil.fill((25, 25, 40), special_flags=pygame.BLEND_RGB_MIN)
+            cache[key] = (img, sil)
+        self.album_cache = cache
+
+    def draw_album(self):
+        s = self.screen
+        s.fill((48, 34, 80))
+        if self.album_cache is None:
+            self.build_album_cache()
+        alb = self.save["album"]
+        n = len([k for k in ALBUM_ORDER if k in alb])
+        self.text(f"Άλμπουμ Τεράτων   {n} / {len(ALBUM_ORDER)}", 40, GOLD, W // 2, 16)
+        mons, bosses = list(MT), list(BOSSES)
+        cw, ch, gap = 125, 172, 8
+        x0 = (W - (cw * 8 + gap * 7)) // 2
+        for i, key in enumerate(mons):
+            self.album_card(pygame.Rect(x0 + i * (cw + gap), 82, cw, ch), key, alb)
+        cw, ch, gap = 190, 222, 14
+        x0 = (W - (cw * 5 + gap * 4)) // 2
+        for i, key in enumerate(bosses):
+            self.album_card(pygame.Rect(x0 + i * (cw + gap), 274, cw, ch), key, alb)
+        self.button((W // 2 - 120, 528, 240, 74), "Πίσω", (80, 90, 140), self.album_close, 32)
+
+    def album_card(self, r, key, alb):
+        s = self.screen
+        t = ALL_TYPES[key]
+        found = key in alb
+        pygame.draw.rect(s, (0, 0, 0), r.move(0, 5), border_radius=14)
+        pygame.draw.rect(s, (250, 240, 210) if found else (90, 80, 110), r, border_radius=14)
+        pygame.draw.rect(s, GOLD if t["boss"] and found else WHITE, r, 3, border_radius=14)
+        img, sil = self.album_cache[key]
+        s.blit(img if found else sil, (r.centerx - img.get_width() // 2, r.y + 6))
+        if found:
+            self.text(t["name"], 16 if not t["boss"] else 16, (60, 40, 30), r.centerx, r.bottom - 52, shadow_px=0)
+            self.text(f"x{alb[key]}", 18, (140, 90, 20), r.centerx, r.bottom - 28, shadow_px=0)
+        else:
+            self.text("???", 26, (200, 200, 230), r.centerx, r.bottom - 50, shadow_px=0)
+
+    def album_close(self):
+        self.state = self.album_back
+
+    def draw_overlay(self, alpha=170):
+        ov = pygame.Surface((W, H), pygame.SRCALPHA)
+        ov.fill((0, 0, 0, alpha))
+        self.screen.blit(ov, (0, 0))
+
+    def draw_pause(self):
+        self.draw_play()
+        self.hot = []
+        self.draw_overlay()
+        self.text("ΠΑΥΣΗ", 64, WHITE, W // 2, 110)
+        self.button((W // 2 - 170, 230, 340, 80), "Συνέχεια", (60, 160, 90), self.resume, 34)
+        self.button((W // 2 - 170, 330, 340, 80), "Άλμπουμ", (150, 80, 190), lambda: self.open_album("pause"), 34)
+        self.button((W // 2 - 170, 430, 340, 80), "Μενού", (90, 90, 140), self.to_menu, 34)
+        self.button((W // 2 - 170, 530, 340, 70), "Ήχος: " + ("ON" if self.sfx.on else "OFF"),
+                    (70, 140, 90) if self.sfx.on else (110, 110, 110), self.toggle_sound, 28)
+
+    def draw_clear(self, dt):
+        self.draw_play()
+        self.hot = []
+        self.draw_overlay(150)
+        info = self.clear_info
+        if random.random() < 0.6:
+            self.ui_particles.append([random.uniform(0, W), -10, random.uniform(-1, 1), random.uniform(2, 4),
+                                      random.choice([GOLD, (255, 120, 160), (120, 220, 255), (140, 255, 140)])])
+        for pp in self.ui_particles:
+            pp[0] += pp[2]
+            pp[1] += pp[3]
+            pygame.draw.rect(self.screen, pp[4], (int(pp[0]), int(pp[1]), 8, 12))
+        self.ui_particles = [pp for pp in self.ui_particles if pp[1] < H + 20]
+        if info["final"]:
+            self.text("ΕΙΣΑΙ Ο ΚΑΛΥΤΕΡΟΣ", 60, GOLD, W // 2, 50, shadow_px=5)
+            self.text("ΚΥΝΗΓΟΣ ΤΕΡΑΤΩΝ!", 60, GOLD, W // 2, 120, shadow_px=5)
+        else:
+            self.text("ΜΠΡΑΒΟ!", 80, GOLD, W // 2, 50, shadow_px=5)
+        self.text(f"Νίκησες: {info['boss']['name']}!", 34, WHITE, W // 2, 200)
+        draw_monster_type(self.screen, W // 2, 380, info["boss"], 1, self.t * 3, scale=1.4)
+        y = 410
+        if info["weapon"]:
+            self.text(f"Νέο όπλο: {info['weapon']['name']}!", 32, info["weapon"]["color"], W // 2, y)
+            y += 46
+        if info["next"]:
+            self.text(f"Άνοιξε ο κόσμος: {info['next']['name']}!", 30, (150, 230, 255), W // 2, y)
+            self.button((W // 2 - 320, 570, 300, 80), "Επόμενος κόσμος", (60, 160, 90),
+                        lambda: self.start_world(self.widx + 1), 28)
+            self.button((W // 2 + 20, 570, 300, 80), "Μενού", (90, 90, 140), self.to_menu, 30)
+        else:
+            self.button((W // 2 - 150, 570, 300, 80), "Μενού", (90, 90, 140), self.to_menu, 30)
+
+    def draw_retry(self):
+        self.draw_play()
+        self.hot = []
+        self.draw_overlay(170)
+        self.text("Ξαναπροσπάθησε!", 66, (255, 200, 90), W // 2, 120, shadow_px=5)
+        self.text("Τα τέρατα κέρδισαν αυτή τη φορά...", 30, WHITE, W // 2, 220)
+        draw_trophy(self.screen, W // 2 - 270, 322, 2.4)
+        self.text(f"Κράτησες {self.trophies} κύπελλα!", 36, GOLD, W // 2 + 40, 300)
+        self.button((W // 2 - 320, 450, 300, 90), "Ξανά!", (60, 160, 90), lambda: self.start_world(self.widx), 38)
+        self.button((W // 2 + 20, 450, 300, 90), "Μενού", (90, 90, 140), self.to_menu, 34)
+
+    # ------------------------------------------------------------ ενέργειες
+    def pause(self):
+        if self.state == "play":
+            self.state = "pause"
+            self.fire_ids.clear()
+            self.joy_id = None
+            self.mouse_fire = False
+            self.save_game()
+
+    def resume(self):
+        self.state = "play"
+
+    def to_menu(self):
+        self.save_game()
+        self.state = "menu"
+        self.world = None
+        self.dark_mask = None
+
+    def toggle_sound(self):
+        self.sfx.set_on(not self.sfx.on)
+        self.save["sound"] = self.sfx.on
+        self.save_game()
+
+    def quit(self):
+        self.save_game()
+        pygame.quit()
+        sys.exit()
+
+    # ------------------------------------------------------------ είσοδος
+    def finger_pos(self, e):
+        try:
+            ww, wh = pygame.display.get_window_size()
+            sc = min(ww / W, wh / H)
+            ox, oy = (ww - W * sc) / 2, (wh - H * sc) / 2
+            return (e.x * ww - ox) / sc, (e.y * wh - oy) / sc
+        except Exception:
+            return e.x * W, e.y * H
+
+    def on_press(self, pos, finger):
+        for rect, action in reversed(self.hot):
+            if rect.collidepoint(pos):
+                action()
+                return
+        if self.state == "play":
+            if finger is None:
+                self.mouse_fire = True
+            elif pos[0] < W * 0.5 and self.joy_id is None:
+                self.joy_id, self.joy_origin, self.joy_pos = finger, pos, pos
+            else:
+                self.fire_ids.add(finger)
+
+    def on_back(self):
+        st = self.state
+        if st == "play":
+            self.pause()
+        elif st == "pause":
+            self.resume()
+        elif st == "album":
+            self.album_close()
+        elif st in ("clear", "retry"):
+            self.to_menu()
+        else:
+            self.quit()
+
+    def handle_events(self):
+        bg_events = {getattr(pygame, n) for n in ("APP_WILLENTERBACKGROUND", "APP_DIDENTERBACKGROUND")
+                     if hasattr(pygame, n)}
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                self.quit()
+            elif e.type in bg_events:
+                self.pause()
+                self.save_game()
+            elif e.type == pygame.KEYDOWN:
+                if e.key in (pygame.K_ESCAPE, getattr(pygame, "K_AC_BACK", -1)):
+                    self.on_back()
+                elif e.key == pygame.K_p:
+                    self.resume() if self.state == "pause" else self.pause()
+                elif e.key == pygame.K_m:
+                    self.toggle_sound()
+                elif e.key == pygame.K_q and self.state == "play":
+                    self.cycle_weapon()
+                elif e.key == pygame.K_RETURN and self.state == "menu":
+                    self.start_world(self.save["unlocked"] - 1)
+            elif e.type == pygame.FINGERDOWN:
+                self.touch_seen = True
+                self.on_press(self.finger_pos(e), e.finger_id)
+            elif e.type == pygame.FINGERMOTION:
+                if e.finger_id == self.joy_id:
+                    self.joy_pos = self.finger_pos(e)
+            elif e.type == pygame.FINGERUP:
+                if e.finger_id == self.joy_id:
+                    self.joy_id = self.joy_pos = None
+                self.fire_ids.discard(e.finger_id)
+            elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                if self.touch_seen or getattr(e, "touch", False):
+                    continue
+                self.on_press(e.pos, None)
+            elif e.type == pygame.MOUSEBUTTONUP and e.button == 1:
+                self.mouse_fire = False
+
+    # ------------------------------------------------------------ βρόχος
+    def frame(self, dt):
+        self.t += dt
+        self.handle_events()
+        self.hot = []
+        st = self.state
+        if st == "play":
+            self.update(dt)
+            if self.state == "play":
+                self.draw_play()
+        st = self.state
+        if st == "menu":
+            self.draw_menu()
+        elif st == "album":
+            self.draw_album()
+        elif st == "pause":
+            self.draw_pause()
+        elif st == "clear":
+            self.draw_clear(dt)
+        elif st == "retry":
+            self.draw_retry()
+        pygame.display.flip()
+
+    def run(self):
+        while True:
+            dt = min(self.clock.tick(FPS) / 1000, 0.05)
+            self.frame(dt)
+
+
+def main():
+    Game().run()
+
+
+if __name__ == "__main__":
+    main()
